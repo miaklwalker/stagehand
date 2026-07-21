@@ -1,0 +1,38 @@
+{
+  "name": "stagehand",
+  "version": "0.1.0",
+  "description": "Fully typesafe saga-style script framework with modern terminal visuals",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc && npm run build && tsc -p tsconfig.examples.json",
+    "example": "npm run build && node --experimental-strip-types examples/deploy.ts",
+    "example:fail": "npm run build && node --experimental-strip-types examples/deploy.ts --fail",
+    "test": "npm run build && node --experimental-strip-types --test test/*.test.ts"
+  },
+  "keywords": [
+    "saga",
+    "script",
+    "cli",
+    "typescript",
+    "rollback",
+    "compensation"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
