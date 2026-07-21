@@ -1,4 +1,4 @@
-import { padEnd, stringWidth, truncate } from "./ansi.js";
+import { padEnd, stringWidth, truncate, wrapText } from "./ansi.js";
 import { frameWidth, palette, spinnerFrame, symbols } from "./theme.js";
 import {
   elapsed,
@@ -150,7 +150,12 @@ function stepLines(step: StepState, tick: number, now: number, compact = false):
   }
 
   if (step.error !== undefined && step.status === "failed") {
-    lines.push(row(DETAIL_INDENT + palette.error(errorMessage(step.error))));
+    const width = frameWidth() - stringWidth(DETAIL_INDENT);
+    // Capped here only because the live frame has a height budget; the closing
+    // frame and the summary both print the message in full.
+    for (const line of wrapText(errorMessage(step.error), width).slice(0, 4)) {
+      lines.push(row(DETAIL_INDENT + palette.error(line)));
+    }
   }
 
   return lines;
@@ -320,7 +325,10 @@ export function renderSummary(state: RunState, now: number): string[] {
       ),
     );
     if (state.failure) {
-      lines.push(row(`${GUTTER}  ${palette.error(errorMessage(state.failure.error))}`));
+      const width = frameWidth() - GUTTER.length - 2;
+      for (const line of wrapText(errorMessage(state.failure.error), width)) {
+        lines.push(row(`${GUTTER}  ${palette.error(line)}`));
+      }
     }
     if (state.rollbackCount > 0) {
       const text = `Rolled back ${state.rollbackCount} step${state.rollbackCount === 1 ? "" : "s"}`;

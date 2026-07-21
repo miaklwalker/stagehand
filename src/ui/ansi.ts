@@ -123,6 +123,55 @@ export function truncate(input: string, max: number): string {
   return out + "…" + (sawEscape && colorEnabled ? `${ESC}0m` : "");
 }
 
+/**
+ * Word-wrap to a visible width, returning plain lines.
+ *
+ * Errors must never be clipped — the useful half of a message like npm's 403
+ * lives at the end of the line. Callers style each returned line themselves,
+ * which sidesteps splitting an escape sequence across a break.
+ */
+export function wrapText(input: string, width: number): string[] {
+  if (width <= 1) return [stripAnsi(input)];
+
+  const lines: string[] = [];
+  let current = "";
+
+  const push = (): void => {
+    if (current !== "") lines.push(current);
+    current = "";
+  };
+
+  for (const word of stripAnsi(input).split(/\s+/).filter(Boolean)) {
+    let token = word;
+
+    // A single token wider than the line (a URL, a stack frame) is hard-broken.
+    while (stringWidth(token) > width) {
+      push();
+      let head = "";
+      let index = 0;
+      while (index < token.length && stringWidth(head) < width) {
+        const char = String.fromCodePoint(token.codePointAt(index) as number);
+        if (stringWidth(head) + stringWidth(char) > width) break;
+        head += char;
+        index += char.length;
+      }
+      lines.push(head);
+      token = token.slice(index);
+    }
+
+    if (token === "") continue;
+    if (current === "") current = token;
+    else if (stringWidth(current) + 1 + stringWidth(token) <= width) current += ` ${token}`;
+    else {
+      push();
+      current = token;
+    }
+  }
+
+  push();
+  return lines.length > 0 ? lines : [""];
+}
+
 export function padEnd(input: string, target: number): string {
   const gap = target - stringWidth(input);
   return gap > 0 ? input + " ".repeat(gap) : input;

@@ -18,7 +18,15 @@ export class ExecError extends Error {
   readonly stderr: string;
 
   constructor(command: string, code: number | null, stderr: string) {
-    const tail = stderr.trim().split("\n").filter(Boolean).slice(-3).join(" · ");
+    // Keep the lines that say what went wrong, drop the ones that say where
+    // the log file is — otherwise the useful part falls off the end.
+    const noise = /^npm (notice|warn)\b|A complete log of this run|^\s*$/;
+    const meaningful = stderr
+      .trim()
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !noise.test(line));
+    const tail = meaningful.slice(-3).join(" · ");
     super(`${command} exited with ${code ?? "signal"}${tail ? `: ${tail}` : ""}`);
     this.name = "ExecError";
     this.command = command;

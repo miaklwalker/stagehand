@@ -144,7 +144,7 @@ const release = new Script<ReleaseInput>({
     name: "authenticate npm",
     retry: { attempts: 2, delayMs: 500 },
     timeoutMs: 20_000,
-    handler: async ({ input, signal, log, warn }) => {
+    handler: async ({ input, ctx, signal, log, warn }) => {
       const user = await tryExec("npm", ["whoami"], { signal });
       if (!user) {
         // A dry run does not need credentials; a real publish does.
@@ -153,6 +153,25 @@ const release = new Script<ReleaseInput>({
         return { npmUser: null as string | null };
       }
       log(`authenticated as ${user}`);
+
+      // npm accepts a scoped publish only for your own username scope or an
+      // org you belong to. Anything else is a 403 *after* the upload starts,
+      // which is far too late — `npm publish --dry-run` never checks this.
+      const scope = ctx.pkgName.startsWith("@") ? ctx.pkgName.slice(1).split("/")[0] : null;
+      if (scope && scope !== user) {
+        const member = await tryExec("npm", ["org", "ls", scope], { signal });
+        if (member === null) {
+          const message =
+            `npm user "${user}" cannot publish to @${scope} — it is neither your ` +
+            `username scope nor an org you belong to. Either rename the package to ` +
+            `@${user}/… or create the "${scope}" org at npmjs.com/org/create.`;
+          if (input.publish) throw new Error(message);
+          warn(message);
+        } else {
+          log(`@${scope} is an org you belong to`);
+        }
+      }
+
       return { npmUser: user as string | null };
     },
   })
@@ -414,6 +433,17 @@ const release = new Script<ReleaseInput>({
       } catch (error) {
         if (error instanceof ExecError && /E402|payment required/i.test(error.stderr)) {
           throw new Error("npm rejected the publish: scoped packages need --access public");
+        }
+        // Every read operation succeeds with a read-only token, so preflight
+        // cannot tell this apart from a healthy login — the write is the first
+        // thing that fails, and npm's own message does not mention tokens.
+        if (error instanceof ExecError && /E403|403 Forbidden/i.test(error.stderr)) {
+          throw new Error(
+            `npm returned 403 for ${ctx.pkgName}@${ctx.nextVersion} as user "${ctx.npmUser}". ` +
+              `Publishing is a write, and read-only or narrowly-scoped granular access tokens ` +
+              `pass every preflight check then fail here. Run \`npm login\` to replace the ` +
+              `token in ~/.npmrc, or issue a granular token with read-write on this scope.`,
+          );
         }
         throw error;
       }
