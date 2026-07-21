@@ -183,6 +183,27 @@ npm run example:fail
 npm run release     # dry run of the publish pipeline
 ```
 
+## TypeScript layout
+
+One config per directory, because editors resolve a file's config by finding
+the nearest `tsconfig.json` — a non-standard filename like `tsconfig.foo.json`
+is invisible to them, so the IDE and the CLI disagree.
+
+| Config | Covers | Why it differs |
+| --- | --- | --- |
+| `tsconfig.json` | `src` | The library. `noEmit`, strict. |
+| `tsconfig.build.json` | `src` | The only config that emits `dist/`. |
+| `examples/tsconfig.json` | `examples` | Imports the built `dist/`. |
+| `test/tsconfig.json` | `test` | Same. |
+| `scripts/tsconfig.json` | `scripts` | Adds `allowImportingTsExtensions`. |
+
+Only `scripts/` needs that last flag. Node's type stripping does not rewrite
+import extensions, so a script importing a sibling script must write
+`./exec.ts` rather than `./exec.js`. The flag cannot go in the root config:
+`tsconfig.build.json` extends it and sets `noEmit: false`, and TypeScript
+rejects `allowImportingTsExtensions` unless `noEmit` or `emitDeclarationOnly`
+is set (TS5096).
+
 ## The release pipeline
 
 `scripts/release.ts` builds and publishes this package, and is itself written
@@ -237,5 +258,20 @@ version is checked against the registry before any work is done.
 
 The live renderer repaints an in-place region and writes logs permanently above
 it. It falls back to line-per-event output when stdout is not a TTY, when
-`NO_COLOR` is set, or when `TERM=dumb` — so CI logs stay greppable. Completed
-phases collapse to a single line if the frame would outgrow the terminal.
+`NO_COLOR` is set, or when `TERM=dumb` — so CI logs stay greppable.
+
+**The frame is always made to fit the viewport**, and this is load-bearing
+rather than cosmetic. Repainting works by moving the cursor up N lines, so a
+frame taller than the terminal scrolls its own anchor off screen and each
+repaint appends a copy instead of overwriting. `renderBody` applies four
+progressively stronger reductions until the frame fits:
+
+1. everything, in full;
+2. finished phases collapse to a one-line summary;
+3. only the running phase keeps its steps, and drops detail lines;
+4. the running phase's steps are windowed around the one executing.
+
+The executing step is never windowed out, and long lines are truncated rather
+than wrapped. A terminal resize invalidates the recorded geometry, so the
+renderer abandons the old region and redraws below it. The closing frame is
+exempt — nothing repaints after it, so it keeps every step.

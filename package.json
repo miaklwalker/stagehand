@@ -17,7 +17,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc && npm run build && tsc -p tsconfig.examples.json",
+    "typecheck": "tsc && npm run build && tsc -p examples && tsc -p test && tsc -p scripts",
     "example": "npm run build && node --experimental-strip-types examples/deploy.ts",
     "example:fail": "npm run build && node --experimental-strip-types examples/deploy.ts --fail",
     "test": "npm run build && node --experimental-strip-types --test test/*.test.ts",
@@ -38,5 +38,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "author": "Michael Walker"
 }

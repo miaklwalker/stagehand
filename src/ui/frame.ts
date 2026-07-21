@@ -107,7 +107,7 @@ export function renderBar(progress: ProgressState, width = 24): string {
   );
 }
 
-function stepLines(step: StepState, tick: number, now: number): string[] {
+function stepLines(step: StepState, tick: number, now: number, compact = false): string[] {
   const lines: string[] = [];
   const active =
     step.status === "running" || step.status === "rolling-back" || step.status === "failed";
@@ -136,8 +136,11 @@ function stepLines(step: StepState, tick: number, now: number): string[] {
   // Kept on failure — how far the bar got is diagnostic. Dropped on success
   // even when the handler forgot to call done(), so green rows stay clean.
   if (step.progress && active) {
-    lines.push(DETAIL_INDENT + renderBar(step.progress));
+    lines.push(row(DETAIL_INDENT + renderBar(step.progress)));
   }
+
+  // Compact mode trades detail for height when the frame must fit a viewport.
+  if (compact) return lines;
 
   if (step.tasks.length > 0 && active) {
     for (const task of step.tasks) {
@@ -164,23 +167,56 @@ function collapsedPhaseLine(phase: PhaseState, tick: number, now: number): strin
   );
 }
 
-function phaseLines(phase: PhaseState, tick: number, now: number, collapsed: boolean): string[] {
-  if (collapsed) return [collapsedPhaseLine(phase, tick, now)];
+function elision(count: number): string {
+  return row(`${STEP_INDENT}${palette.faint(`… ${count} more`)}`);
+}
+
+const isActiveStep = (step: StepState): boolean =>
+  step.status === "running" || step.status === "rolling-back" || step.status === "failed";
+
+/**
+ * Pick a window of steps around the active one. Used only when a phase cannot
+ * fit whole — the running step must always stay visible.
+ */
+function stepWindow(steps: StepState[], budget: number): { start: number; end: number } {
+  if (steps.length <= budget) return { start: 0, end: steps.length };
+  const active = steps.findIndex(isActiveStep);
+  const anchor = active === -1 ? steps.length - 1 : active;
+  let start = Math.max(0, anchor - Math.floor(budget / 2));
+  start = Math.min(start, steps.length - budget);
+  return { start, end: start + budget };
+}
+
+type PhaseMode = "full" | "collapsed" | "compact";
+
+function phaseLines(
+  phase: PhaseState,
+  tick: number,
+  now: number,
+  mode: PhaseMode,
+  stepBudget = Number.POSITIVE_INFINITY,
+): string[] {
+  if (mode === "collapsed") return [collapsedPhaseLine(phase, tick, now)];
 
   const status = phaseStatus(phase);
-  const name =
-    status === "pending" ? palette.faint(phase.name) : palette.bold(phase.name);
+  const name = status === "pending" ? palette.faint(phase.name) : palette.bold(phase.name);
   const duration = phaseElapsed(phase, now);
   const right =
     status === "pending" || duration === undefined ? "" : palette.faint(formatDuration(duration));
 
   const lines = [row(`${PHASE_INDENT}${phaseIcon(phase, tick)} ${name}`, right)];
-  if (phase.description && status !== "pending") {
+  if (mode === "full" && phase.description && status !== "pending") {
     lines.push(row(`${STEP_INDENT}${palette.faint(phase.description)}`));
   }
-  for (const step of phase.steps) {
-    lines.push(...stepLines(step, tick, now));
+
+  const compact = mode === "compact";
+  const { start, end } = stepWindow(phase.steps, Math.max(1, stepBudget));
+  if (start > 0) lines.push(elision(start));
+  for (const step of phase.steps.slice(start, end)) {
+    lines.push(...stepLines(step, tick, now, compact));
   }
+  if (end < phase.steps.length) lines.push(elision(phase.steps.length - end));
+
   return lines;
 }
 
@@ -194,24 +230,66 @@ export function renderHeader(state: RunState): string[] {
 }
 
 /**
- * The live body. Fully-finished phases collapse to one line when the frame
- * would otherwise outgrow the terminal and break in-place repainting.
+ * Lines the live region may occupy without the terminal scrolling under it.
+ *
+ * The hard limit is the viewport height; the margin covers the one extra line
+ * a permanent log write costs when the region is already at full height.
  */
-export function renderBody(state: RunState, tick: number, now: number): string[] {
-  const build = (collapseDone: boolean): string[] => {
+export function bodyBudget(): number {
+  return Math.max(6, (process.stdout.rows ?? 40) - 3);
+}
+
+/**
+ * The live body, guaranteed to fit `bodyBudget()`.
+ *
+ * This guarantee is load-bearing, not cosmetic: the renderer repaints by moving
+ * the cursor up N lines, so a frame taller than the viewport scrolls its own
+ * top off screen and every repaint appends a copy instead of overwriting. Four
+ * progressively stronger reductions are tried, and the result is clamped.
+ */
+export function renderBody(state: RunState, tick: number, now: number, fit = true): string[] {
+  const budget = bodyBudget();
+
+  const build = (mode: (phase: PhaseState) => PhaseMode, stepBudget?: number): string[] => {
     const out: string[] = [];
     state.phases.forEach((phase, index) => {
-      const status = phaseStatus(phase);
-      const collapsed = collapseDone && (status === "success" || status === "skipped");
-      out.push(...phaseLines(phase, tick, now, collapsed));
+      out.push(...phaseLines(phase, tick, now, mode(phase), stepBudget));
       if (index < state.phases.length - 1) out.push("");
     });
     return out;
   };
 
-  const full = build(false);
-  const budget = (process.stdout.rows ?? 40) - 8;
-  return full.length <= budget ? full : build(true);
+  // The closing frame is written permanently and never repainted, so it may
+  // scroll freely — keep every step visible there.
+  if (!fit) return build(() => "full");
+
+  const done = (phase: PhaseState): boolean => {
+    const status = phaseStatus(phase);
+    return status === "success" || status === "skipped";
+  };
+  const active = (phase: PhaseState): boolean => phaseStatus(phase) === "running";
+
+  // 1. Everything, in full.
+  let out = build(() => "full");
+  if (out.length <= budget) return out;
+
+  // 2. Finished phases become one line each.
+  out = build((phase) => (done(phase) ? "collapsed" : "full"));
+  if (out.length <= budget) return out;
+
+  // 3. Only the running phase keeps its steps, and drops its detail lines.
+  out = build((phase) => (active(phase) ? "compact" : "collapsed"));
+  if (out.length <= budget) return out;
+
+  // 4. Window the running phase's steps around the one actually executing.
+  const overhead = state.phases.filter((phase) => !active(phase)).length * 2;
+  out = build(
+    (phase) => (active(phase) ? "compact" : "collapsed"),
+    Math.max(1, budget - overhead - 2),
+  );
+
+  // Last resort: a phase with a huge task list, or a viewport of a few rows.
+  return out.length <= budget ? out : out.slice(0, budget);
 }
 
 export function renderSummary(state: RunState, now: number): string[] {

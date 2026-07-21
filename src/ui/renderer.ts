@@ -45,6 +45,7 @@ export class LiveRenderer implements Renderer {
     this.stopped = false;
     this.write(renderHeader(state).join("\n") + "\n");
     this.stream.write(cursor.hide);
+    this.stream.on("resize", this.onResize);
     this.timer = setInterval(() => {
       this.tick += 1;
       this.paint();
@@ -52,6 +53,16 @@ export class LiveRenderer implements Renderer {
     this.timer.unref?.();
     this.paint();
   }
+
+  /**
+   * A resize reflows whatever is already on screen, so the line count we
+   * recorded no longer describes it. Abandon the old region and redraw below
+   * it — a stale frame left in scrollback beats a corrupted cursor.
+   */
+  private readonly onResize = (): void => {
+    this.liveLines = 0;
+    this.paint();
+  };
 
   /**
    * Handlers may call this thousands of times (a progress bar in a tight
@@ -87,11 +98,12 @@ export class LiveRenderer implements Renderer {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.stream.off("resize", this.onResize);
 
     const now = performance.now();
     this.clear();
     const final = [
-      ...renderBody(this.state, this.tick, now),
+      ...renderBody(this.state, this.tick, now, false),
       ...renderSummary(this.state, now),
     ];
     this.write(final.join("\n") + "\n");
@@ -102,7 +114,13 @@ export class LiveRenderer implements Renderer {
   private paint(): void {
     if (this.stopped || !this.state) return;
     const now = performance.now();
-    const body = renderBody(this.state, this.tick, now);
+
+    // renderBody already fits itself to the viewport; this clamp is the
+    // backstop that keeps the up-N-lines invariant true no matter what, since
+    // a frame taller than the terminal scrolls its own anchor off screen.
+    const maxLines = Math.max(1, (process.stdout.rows ?? 40) - 1);
+    const body = renderBody(this.state, this.tick, now).slice(0, maxLines);
+
     this.clear();
     this.write(body.join("\n") + "\n");
     this.liveLines = body.length;

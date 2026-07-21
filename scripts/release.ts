@@ -18,8 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Script } from "../dist/index.js";
-// Node's type stripping does not rewrite extensions, so sibling TypeScript is
-// imported by its real path. The framework itself comes from built output.
+
 import { ExecError, exec, tryExec } from "./exec.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -42,7 +41,7 @@ interface ReleaseInput {
   skipTests: boolean;
   /**
    * Perform the local mutations (version write, git tag) but fail at the
-   * publish step, so the compensation path can be exercised without touching
+   * publishing step, so the compensation path can be exercised without touching
    * the registry. Nothing leaves this machine.
    */
   simulateFailure: boolean;
