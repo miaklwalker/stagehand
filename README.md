@@ -177,10 +177,61 @@ export const verifyId = stepFor<Input, { user: User }>()({
 ```
 npm run build       # emit dist/
 npm test            # node:test suite
-npm run typecheck   # library + examples + tests
+npm run typecheck   # library + examples + tests + scripts
 npm run example     # the happy path, live
 npm run example:fail
+npm run release     # dry run of the publish pipeline
 ```
+
+## The release pipeline
+
+`scripts/release.ts` builds and publishes this package, and is itself written
+with this framework — the pipeline is the integration test.
+
+```
+npm run release                              # dry run; mutates nothing
+npm run release -- --simulate-failure        # rehearse the rollback path
+npm run release -- --publish                 # for real
+npm run release -- --publish --bump minor
+npm run release -- --publish --version 1.0.0 --tag next
+```
+
+| Phase | Steps |
+| --- | --- |
+| Preflight | read manifest · authenticate npm · inspect git · resolve version · check registry |
+| Verify | typecheck · run tests |
+| Package | write version · clean dist · build · verify artifacts · audit tarball |
+| Publish | tag release · push tag · publish to npm |
+
+Three steps compensate, and the ordering is deliberate — `publish to npm` is
+last, so a failure anywhere *before* it unwinds everything and nothing reaches
+the registry:
+
+| Step | Rollback |
+| --- | --- |
+| `write version` | restore the previous version in package.json |
+| `clean dist` | rebuild from source |
+| `tag release` | delete the local tag |
+| `push tag` | delete the remote tag |
+| `publish to npm` | `npm deprecate` — a published version cannot be recalled |
+
+`--simulate-failure` performs the local mutations and then fails at the publish
+step. Nothing leaves the machine, and you get to watch the unwind:
+
+```
+  ✖ publish to npm  0ms  simulated publish failure (--simulate-failure)
+    ▲ deleted local tag v0.2.0
+    ▲ dist rebuilt from source
+    ▲ package.json version restored to 0.1.0
+
+  ✖ Failed at Publish › publish to npm after 8.1s
+  ↺ Rolled back 3 steps
+```
+
+Other things it checks: a scoped package without `publishConfig.access`
+(`"public"`) would be published as restricted, so preflight refuses; the tarball
+is audited path-by-path against an allowlist so `src/` can never leak; and the
+version is checked against the registry before any work is done.
 
 ## Rendering notes
 

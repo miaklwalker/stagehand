@@ -2,6 +2,10 @@
   "extends": "./tsconfig.json",
   "include": [
     "examples",
-    "test"
-  ]
+    "test",
+    "scripts"
+  ],
+  "compilerOptions": {
+    "allowImportingTsExtensions": true
+  }
 }

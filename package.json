@@ -1,5 +1,5 @@
 {
-  "name": "stagehand",
+  "name": "@michaelrwalker/stagehand",
   "version": "0.1.0",
   "description": "Fully typesafe saga-style script framework with modern terminal visuals",
   "type": "module",
@@ -20,7 +20,8 @@
     "typecheck": "tsc && npm run build && tsc -p tsconfig.examples.json",
     "example": "npm run build && node --experimental-strip-types examples/deploy.ts",
     "example:fail": "npm run build && node --experimental-strip-types examples/deploy.ts --fail",
-    "test": "npm run build && node --experimental-strip-types --test test/*.test.ts"
+    "test": "npm run build && node --experimental-strip-types --test test/*.test.ts",
+    "release": "npm run build && node --experimental-strip-types scripts/release.ts"
   },
   "keywords": [
     "saga",
@@ -34,5 +35,8 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
