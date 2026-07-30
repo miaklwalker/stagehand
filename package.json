@@ -21,7 +21,7 @@
     "example": "npm run build && node --experimental-strip-types examples/deploy.ts",
     "example:fail": "npm run build && node --experimental-strip-types examples/deploy.ts --fail",
     "test": "npm run build && node --experimental-strip-types --test test/*.test.ts",
-    "release": "npm run build && node --experimental-strip-types scripts/release.ts"
+    "release": "release-it"
   },
   "keywords": [
     "saga",
@@ -38,7 +38,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "release-it": "^20.2.1"
   },
   "publishConfig": {
     "access": "public"
