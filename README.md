@@ -22,8 +22,9 @@ const result = await new Script<{ service: string }>({ name: "deploy" })
   .addStep({
     name: "upload artifact",
     handler: async ({ ctx, progress }) => {
+        //          ^ ctx.sha is typed here
       const bar = progress({ total: 100, label: "uploading" });
-      //          ^ ctx.sha is typed here
+
       return { uploadId: await upload(ctx.sha, bar) };
     },
     rollback: async ({ output }) => cdn.delete(output.uploadId),
@@ -84,6 +85,27 @@ new Script<{ id: string }>()      // Ctx = {}
 Reaching for a key a previous step did not produce is a compile error, as is
 reading the wrong shape in a `rollback`. A handler that returns nothing leaves
 the context unchanged.
+
+## Input from a schema
+
+`In` doesn't have to be written by hand either. `defineInput` takes any
+[Standard Schema](https://standardschema.dev)-compliant validator — Zod,
+Valibot, ArkType, Effect Schema, or a hand-rolled one — infers `In` from its
+output type, and validates whatever is passed to `run()` before any phase
+executes, throwing `SchemaValidationError` on failure:
+
+```ts
+const deploy = new Script({ name: "deploy" })
+  .defineInput(z.object({ service: z.string() }))
+  .addStep({
+    name: "resolve commit",
+    handler: async ({ input }) => ({ sha: await git.head(input.service) }),
+    //                     ^ input.service: string
+  });
+```
+
+Call it first, right after construction — any `addStep`/`addPhase` added
+before it still sees the previous `In`.
 
 ## Rollback semantics
 

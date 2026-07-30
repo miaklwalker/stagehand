@@ -1,3 +1,27 @@
+import type { StandardSchemaV1 } from "@standard-schema/spec";
+
+/** The value passed to `run()` failed validation against `defineInput`'s schema. */
+export class SchemaValidationError extends Error {
+  readonly issues: ReadonlyArray<StandardSchemaV1.Issue>;
+
+  constructor(issues: ReadonlyArray<StandardSchemaV1.Issue>) {
+    super(
+      issues
+        .map((issue) => {
+          const path = issue.path
+            ?.map((segment) =>
+              String(typeof segment === "object" && segment !== null ? segment.key : segment),
+            )
+            .join(".");
+          return path ? `${path}: ${issue.message}` : issue.message;
+        })
+        .join("; "),
+    );
+    this.name = "SchemaValidationError";
+    this.issues = issues;
+  }
+}
+
 /** A step's handler threw. `cause` holds whatever it actually threw. */
 export class StepFailedError extends Error {
   readonly phase: string;

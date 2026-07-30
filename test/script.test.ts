@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { StandardSchemaV1 } from "@standard-schema/spec";
 
-import { Script, StepTimeoutError } from "../dist/index.js";
+import { SchemaValidationError, Script, StepTimeoutError } from "../dist/index.js";
 
 const quiet = { silent: true, handleSignals: false } as const;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -325,4 +326,48 @@ test("partial context is returned after a failure", async () => {
 
   assert.equal(result.ok, false);
   assert.deepEqual(result.ok === false && result.ctx, { kept: "yes" });
+});
+
+/** A hand-rolled Standard Schema — any spec-compliant library works, not just this one. */
+const numberInput: StandardSchemaV1<unknown, { n: number }> = {
+  "~standard": {
+    version: 1,
+    vendor: "hand-rolled",
+    validate: (value) => {
+      const v = value as { n?: unknown };
+      return typeof v?.n === "number"
+        ? { value: { n: v.n } }
+        : { issues: [{ message: "n must be a number", path: ["n"] }] };
+    },
+  },
+};
+
+test("defineInput infers In from the schema's output type and validates at run()", async () => {
+  const result = await new Script({ name: "t", ...quiet })
+    .defineInput(numberInput)
+    .addStep({ name: "double", handler: ({ input }) => ({ doubled: input.n * 2 }) })
+    .run({ n: 21 });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.ok && result.ctx, { doubled: 42 });
+});
+
+test("defineInput rejects invalid input before any step runs", async () => {
+  let ran = false;
+  const script = new Script({ name: "t", ...quiet })
+    .defineInput(numberInput)
+    .addStep({
+      name: "double",
+      handler: ({ input }) => {
+        ran = true;
+        return { doubled: input.n * 2 };
+      },
+    });
+
+  await assert.rejects(
+    // @ts-expect-error - deliberately passing the wrong shape to exercise runtime validation
+    () => script.run({ n: "not a number" }),
+    SchemaValidationError,
+  );
+  assert.equal(ran, false);
 });

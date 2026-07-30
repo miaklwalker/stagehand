@@ -1,5 +1,6 @@
+import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { createRollbackContext, createStepContext } from "./context.js";
-import { ScriptAbortedError, StepTimeoutError, isAbort } from "./errors.js";
+import { ScriptAbortedError, SchemaValidationError, StepTimeoutError, isAbort } from "./errors.js";
 import type { PhaseState, RunState, StepState } from "./state.js";
 import type {
   Merge,
@@ -68,9 +69,43 @@ export interface RunOptions {
 export class Script<In = void, Ctx extends object = {}> {
   private readonly options: ScriptOptions;
   private readonly definition: PhaseDefinition[] = [];
+  private _schema: StandardSchemaV1 | undefined;
 
   constructor(options: ScriptOptions | string = {}) {
     this.options = typeof options === "string" ? { name: options } : options;
+  }
+
+  /**
+   * Provide a [Standard Schema](https://standardschema.dev) describing the run
+   * input instead of writing `In` by hand — any compliant library works (Zod,
+   * Valibot, ArkType, Effect Schema, ...). `In` is inferred from the schema's
+   * output type, and the value passed to `run()` is validated against it
+   * before any phase executes, throwing {@link SchemaValidationError} on
+   * failure.
+   *
+   * Call this first, right after construction — every `addStep`/`addPhase`
+   * called before it still sees the old `In`.
+   *
+   * ```ts
+   * const deploy = new Script({ name: "deploy" })
+   *   .defineInput(z.object({ service: z.string() }))
+   *   .addStep({
+   *     name: "resolve commit",
+   *     handler: async ({ input }) => ({ sha: await git.head(input.service) }),
+   *   });
+   * ```
+   */
+  defineInput<TSchema>(schema: StandardSchemaV1<unknown, TSchema>): Script<TSchema, Ctx> {
+    this._schema = schema as StandardSchemaV1;
+    return this as unknown as Script<TSchema, Ctx>;
+  }
+
+  /** Validate `input` against the schema from `defineInput`, if any. */
+  private async validateInput(input: In): Promise<In> {
+    if (!this._schema) return input;
+    const result = await this._schema["~standard"].validate(input);
+    if (result.issues) throw new SchemaValidationError(result.issues);
+    return result.value as In;
   }
 
   /** Open a new phase. Subsequent `addStep` calls land in it. */
@@ -135,6 +170,8 @@ export class Script<In = void, Ctx extends object = {}> {
   /* ------------------------------------------------------------------------ */
 
   async run(input: In, runOptions: RunOptions = {}): Promise<RunResult<Ctx>> {
+    input = await this.validateInput(input);
+
     const runtime: RuntimeStep[] = [];
     const phases: PhaseState[] = this.definition.map((phase, phaseIndex) => {
       const steps: StepState[] = phase.steps.map((def) => {

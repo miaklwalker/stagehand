@@ -2,6 +2,7 @@ export { Script, script, stepFor, type RunOptions } from "./script.js";
 
 export {
   RollbackFailedError,
+  SchemaValidationError,
   ScriptAbortedError,
   StepFailedError,
   StepTimeoutError,
