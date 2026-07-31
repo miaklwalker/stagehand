@@ -6,6 +6,7 @@ import {
   formatDuration,
   phaseElapsed,
   phaseStatus,
+  type LogEntry,
   type PhaseState,
   type ProgressState,
   type RunState,
@@ -17,13 +18,6 @@ const GUTTER = "  ";
 const PHASE_INDENT = GUTTER;
 const STEP_INDENT = GUTTER + "   ";
 const DETAIL_INDENT = GUTTER + "     ";
-
-export type LogLevel = "log" | "info" | "warn" | "error" | "success";
-
-export interface LogEntry {
-  level: LogLevel;
-  message: string;
-}
 
 /** left text, right text, padded to the frame width and clipped safely. */
 function row(left: string, right = ""): string {
@@ -154,6 +148,12 @@ function stepLines(step: StepState, tick: number, now: number, compact = false):
     }
   }
 
+  // logPlacement: "step" routes entries here instead of the scrollback; shown
+  // regardless of `active` so they stay readable once the step has settled.
+  for (const entry of step.logs) {
+    lines.push(renderLogEntry(entry));
+  }
+
   if (step.error !== undefined && step.status === "failed") {
     const width = frameWidth() - stringWidth(DETAIL_INDENT);
     // Capped here only because the live frame has a height budget; the closing
@@ -230,6 +230,12 @@ function phaseLines(
   return lines;
 }
 
+/** logPlacement: "bottom" — the most recent lines, below the whole phase tree. */
+function renderLogTail(entries: LogEntry[]): string[] {
+  if (entries.length === 0) return [];
+  return ["", ...entries.map((entry) => renderLogEntry(entry))];
+}
+
 export function renderHeader(state: RunState): string[] {
   const lines = ["", row(`${GUTTER}${palette.accent(symbols.brand)} ${palette.bold(state.name)}`)];
   if (state.description) {
@@ -259,6 +265,7 @@ export function bodyBudget(): number {
  */
 export function renderBody(state: RunState, tick: number, now: number, fit = true): string[] {
   const budget = bodyBudget();
+  const tail = renderLogTail(state.logTail);
 
   const build = (mode: (phase: PhaseState) => PhaseMode, stepBudget?: number): string[] => {
     const out: string[] = [];
@@ -271,7 +278,7 @@ export function renderBody(state: RunState, tick: number, now: number, fit = tru
 
   // The closing frame is written permanently and never repainted, so it may
   // scroll freely — keep every step visible there.
-  if (!fit) return build(() => "full");
+  if (!fit) return [...build(() => "full"), ...tail];
 
   const done = (phase: PhaseState): boolean => {
     const status = phaseStatus(phase);
@@ -281,25 +288,26 @@ export function renderBody(state: RunState, tick: number, now: number, fit = tru
 
   // 1. Everything, in full.
   let out = build(() => "full");
-  if (out.length <= budget) return out;
+  if (out.length + tail.length <= budget) return [...out, ...tail];
 
   // 2. Finished phases become one line each.
   out = build((phase) => (done(phase) ? "collapsed" : "full"));
-  if (out.length <= budget) return out;
+  if (out.length + tail.length <= budget) return [...out, ...tail];
 
   // 3. Only the running phase keeps its steps, and drops its detail lines.
   out = build((phase) => (active(phase) ? "compact" : "collapsed"));
-  if (out.length <= budget) return out;
+  if (out.length + tail.length <= budget) return [...out, ...tail];
 
   // 4. Window the running phase's steps around the one actually executing.
   const overhead = state.phases.filter((phase) => !active(phase)).length * 2;
   out = build(
     (phase) => (active(phase) ? "compact" : "collapsed"),
-    Math.max(1, budget - overhead - 2),
+    Math.max(1, budget - overhead - 2 - tail.length),
   );
+  const combined = [...out, ...tail];
 
   // Last resort: a phase with a huge task list, or a viewport of a few rows.
-  return out.length <= budget ? out : out.slice(0, budget);
+  return combined.length <= budget ? combined : combined.slice(0, budget);
 }
 
 export function renderSummary(state: RunState, now: number): string[] {

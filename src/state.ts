@@ -1,5 +1,12 @@
 import type { PhaseStatus, RunStatus, StepStatus } from "./types.js";
 
+export type LogLevel = "log" | "info" | "warn" | "error" | "success";
+
+export interface LogEntry {
+  level: LogLevel;
+  message: string;
+}
+
 export interface ProgressState {
   total: number;
   value: number;
@@ -26,6 +33,8 @@ export interface StepState {
   error?: unknown;
   progress?: ProgressState;
   tasks: TaskState[];
+  /** Entries routed here by `logPlacement: "step"` — most recent last, capped. */
+  logs: LogEntry[];
   hasRollback: boolean;
 }
 
@@ -45,6 +54,8 @@ export interface RunState {
   failure?: { phase: string; step: string; error: unknown };
   rollbackCount: number;
   rollbackFailures: number;
+  /** Entries routed here by `logPlacement: "bottom"` — most recent last, capped. */
+  logTail: LogEntry[];
 }
 
 export function phaseStatus(phase: PhaseState): PhaseStatus {

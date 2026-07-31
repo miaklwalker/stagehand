@@ -1,10 +1,15 @@
 /**
- * Saga semantics: `rollback`, `rollbackKeys` and `clean`.
+ * Saga semantics: `rollback`, `rollbackKeys`, `clean` — and `logPlacement`.
  *
  * A checkout touches three systems that cannot be undone by a database
  * transaction — inventory, the payment gateway, the warehouse. Each step that
  * mutates something declares how to undo it, and the run unwinds in reverse
  * when a later step fails.
+ *
+ * `logPlacement: "step"` means every compensation's `log()` call lands nested
+ * under the step it is undoing, rather than in the scrollback above the whole
+ * frame — so as the unwind runs top to bottom, each entry sits right beside
+ * the step it explains.
  *
  *   npm run example:checkout          watch it unwind
  *   npm run example:checkout -- --ok  the happy path
@@ -24,6 +29,7 @@ const checkout = new Script<Order>({
   name: "checkout",
   description: "Reserve stock, take payment, ship it",
   rollback: "all",
+  logPlacement: "step",
 })
   .addPhase("Cart", { description: "Nothing here mutates anything" })
   .addStep({

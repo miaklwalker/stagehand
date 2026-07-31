@@ -234,6 +234,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
           status: "pending",
           attempts: 0,
           tasks: [],
+          logs: [],
           hasRollback: typeof def.rollback === "function",
         };
         if (def.description !== undefined) state.description = def.description;
@@ -255,12 +256,14 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
       startedAt: performance.now(),
       rollbackCount: 0,
       rollbackFailures: 0,
+      logTail: [],
     };
     if (this.options.description !== undefined) state.description = this.options.description;
 
     const renderer = createRenderer({
       ...(this.options.plain !== undefined ? { plain: this.options.plain } : {}),
       ...(this.options.silent !== undefined ? { silent: this.options.silent } : {}),
+      ...(this.options.logPlacement !== undefined ? { logPlacement: this.options.logPlacement } : {}),
     });
 
     const runController = new AbortController();

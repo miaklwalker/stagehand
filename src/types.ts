@@ -69,6 +69,24 @@ export type PhaseStatus = "pending" | "running" | "success" | "failed" | "skippe
 
 export type RunStatus = "pending" | "running" | "success" | "failed" | "aborted";
 
+/**
+ * Where `log`/`info`/`warn`/`error`/`success` land in the live terminal.
+ *
+ * - `"scrollback"` (default): a permanent line above the frame — the complete
+ *   record, in order, for the whole run.
+ * - `"step"`: nested under the step that logged it, alongside its tasks and
+ *   progress bar. Keeps only the most recent few per step.
+ * - `"bottom"`: a rolling tail of the most recent lines across the whole run,
+ *   shown below the phase tree.
+ *
+ * `"step"` and `"bottom"` trade completeness for locality — both cap what
+ * they keep, so reach for `"scrollback"` when the log is the thing you need
+ * to still have after the run. Only the live renderer honours this; the
+ * plain/CI renderer prints every line immediately as it happens regardless,
+ * which is already both complete and in place.
+ */
+export type LogPlacement = "scrollback" | "step" | "bottom";
+
 /* -------------------------------------------------------------------------- */
 /* Handler-facing UI surface                                                   */
 /* -------------------------------------------------------------------------- */
@@ -114,7 +132,7 @@ export interface StepContext<In, Ctx> {
   readonly phase: string;
   readonly step: string;
 
-  /** Permanent line, printed above the live frame and kept in scrollback. */
+  /** Where this lands is controlled by `logPlacement` (default: a permanent line above the live frame, kept in scrollback). */
   log(message: string): void;
   info(message: string): void;
   warn(message: string): void;
@@ -157,6 +175,7 @@ export interface RollbackContext<In, Ctx, Out> {
   readonly phase: string;
   readonly step: string;
 
+  /** Where this lands is controlled by `logPlacement`, as in a handler. */
   log(message: string): void;
   status(message: string): void;
   /** Annotate the step's title, as in a handler. Replaces whatever it set. */
@@ -234,6 +253,8 @@ export interface ScriptOptions {
   silent?: boolean;
   /** Rollback on SIGINT/SIGTERM. Default true. */
   handleSignals?: boolean;
+  /** Where `log`/`info`/`warn`/`error`/`success` land. Default `"scrollback"`. */
+  logPlacement?: LogPlacement;
 }
 
 /* -------------------------------------------------------------------------- */

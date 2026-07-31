@@ -1,6 +1,5 @@
-import type { ProgressState, StepState, TaskState } from "./state.js";
+import type { LogLevel, ProgressState, StepState, TaskState } from "./state.js";
 import type { Renderer } from "./ui/renderer.js";
-import type { LogLevel } from "./ui/frame.js";
 import type {
   ProgressHandle,
   RollbackContext,
@@ -121,7 +120,9 @@ export function createStepContext<In, Ctx>(
   attempt: number,
 ): StepContext<In, Ctx> {
   const { renderer, step, phaseName } = deps;
-  const emit = (level: LogLevel) => (message: string) => renderer.log({ level, message });
+  // `step` is a routing hint: renderers that place logs on the step itself
+  // (rather than the scrollback) need to know which one.
+  const emit = (level: LogLevel) => (message: string) => renderer.log({ level, message }, step);
 
   return {
     input,
@@ -163,7 +164,7 @@ export function createRollbackContext<In, Ctx, Out>(
     signal,
     phase: phaseName,
     step: step.name,
-    log: (message) => renderer.log({ level: "warn", message }),
+    log: (message) => renderer.log({ level: "warn", message }, step),
     status(message) {
       step.statusText = message;
       renderer.refresh();

@@ -21,7 +21,7 @@ function withRows<T>(rows: number, fn: () => T): T {
 }
 
 function makeStep(name: string, status: StepState["status"], extra: Partial<StepState> = {}): StepState {
-  return { name, phaseIndex: 0, status, attempts: 1, tasks: [], hasRollback: false, ...extra };
+  return { name, phaseIndex: 0, status, attempts: 1, tasks: [], logs: [], hasRollback: false, ...extra };
 }
 
 /** Mirrors the release pipeline: 4 phases, 13 steps, descriptions and detail. */
@@ -85,6 +85,7 @@ function releaseShapedRun(): RunState {
     startedAt: 0,
     rollbackCount: 0,
     rollbackFailures: 0,
+    logTail: [],
   };
 }
 

@@ -24,6 +24,7 @@
     "example:resilience": "npm run build && node --experimental-strip-types examples/resilience.ts",
     "example:intake": "npm run build && node --experimental-strip-types examples/intake.ts",
     "example:modular": "npm run build && node --experimental-strip-types examples/modular.ts",
+    "example:log-placement": "npm run build && node --experimental-strip-types examples/log-placement.ts",
     "test": "npm run build && node --experimental-strip-types --test test/*.test.ts",
     "release": "release-it"
   },

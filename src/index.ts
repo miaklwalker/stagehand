@@ -14,6 +14,7 @@ export type {
   Awaitable,
   CleanField,
   Cleaned,
+  LogPlacement,
   Merge,
   PhaseOptions,
   PhaseStatus,

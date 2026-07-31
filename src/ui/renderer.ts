@@ -1,26 +1,23 @@
 import { cursor } from "./ansi.js";
 import { palette, supportsAnimation, symbols } from "./theme.js";
-import {
-  renderBody,
-  renderHeader,
-  renderLogEntry,
-  renderSummary,
-  type LogEntry,
-} from "./frame.js";
+import { renderBody, renderHeader, renderLogEntry, renderSummary } from "./frame.js";
 import {
   elapsed,
   errorMessage,
   formatDuration,
+  type LogEntry,
   type PhaseState,
   type RunState,
   type StepState,
 } from "../state.js";
+import type { LogPlacement } from "../types.js";
 
 export interface Renderer {
   start(state: RunState): void;
   /** State mutated; repaint when the renderer is live. */
   refresh(): void;
-  log(entry: LogEntry): void;
+  /** `step` is a routing hint — where the entry came from, for placements that nest it there. */
+  log(entry: LogEntry, step?: StepState): void;
   onPhaseStart(phase: PhaseState): void;
   onStepStart(step: StepState): void;
   onStepEnd(step: StepState): void;
@@ -29,6 +26,14 @@ export interface Renderer {
 
 const FRAME_INTERVAL_MS = 80;
 const MIN_REPAINT_MS = 32;
+/** Both "step" and "bottom" placement are an honestly-rolling tail, not a
+ * complete record — reach for "scrollback" when completeness matters. */
+const LOG_TAIL_LIMIT = 8;
+
+function pushCapped(entries: LogEntry[], entry: LogEntry, limit: number): void {
+  entries.push(entry);
+  if (entries.length > limit) entries.shift();
+}
 
 /** Repaints an in-place region below permanently-written output. */
 export class LiveRenderer implements Renderer {
@@ -39,6 +44,11 @@ export class LiveRenderer implements Renderer {
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
   private lastPaintAt = 0;
+  private readonly logPlacement: LogPlacement;
+
+  constructor(logPlacement: LogPlacement = "scrollback") {
+    this.logPlacement = logPlacement;
+  }
 
   start(state: RunState): void {
     this.state = state;
@@ -74,8 +84,20 @@ export class LiveRenderer implements Renderer {
     this.paint();
   }
 
-  log(entry: LogEntry): void {
+  log(entry: LogEntry, step?: StepState): void {
     if (this.stopped) return;
+
+    if (this.logPlacement === "step" && step) {
+      pushCapped(step.logs, entry, LOG_TAIL_LIMIT);
+      this.paint();
+      return;
+    }
+    if (this.logPlacement === "bottom" && this.state) {
+      pushCapped(this.state.logTail, entry, LOG_TAIL_LIMIT);
+      this.paint();
+      return;
+    }
+
     this.clear();
     this.write(renderLogEntry(entry) + "\n");
     this.paint();
@@ -212,11 +234,15 @@ export class SilentRenderer implements Renderer {
   stop(): void {}
 }
 
-export function createRenderer(options: { plain?: boolean; silent?: boolean }): Renderer {
+export function createRenderer(options: {
+  plain?: boolean;
+  silent?: boolean;
+  logPlacement?: LogPlacement;
+}): Renderer {
   if (options.silent) return new SilentRenderer();
   if (options.plain === true) return new PlainSummaryRenderer();
-  if (options.plain === false) return new LiveRenderer();
-  return supportsAnimation() ? new LiveRenderer() : new PlainSummaryRenderer();
+  if (options.plain === false) return new LiveRenderer(options.logPlacement);
+  return supportsAnimation() ? new LiveRenderer(options.logPlacement) : new PlainSummaryRenderer();
 }
 
 export const uiPalette = palette;

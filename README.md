@@ -214,7 +214,7 @@ Every handler receives one object:
 | `ctx` | everything earlier steps produced, fully typed |
 | `signal` | aborts on timeout, Ctrl-C, or an external signal |
 | `attempt` | 1-based, useful with `retry` |
-| `log` / `info` / `warn` / `error` / `success` | permanent lines above the live frame |
+| `log` / `info` / `warn` / `error` / `success` | a line, placed per `logPlacement` (default: permanent, above the live frame) |
 | `status(text)` | transient one-liner beside the step, cleared when it settles |
 | `note(text)` | annotates the step title — `(400 rows found)` — and stays |
 | `progress({ total, label })` | a progress bar → `update` / `increment` / `setTotal` / `done` |
@@ -248,6 +248,42 @@ which is where a count, a size, or an id belongs.
 Calling `note` again replaces the text; `note("")` removes it. Both renderers
 show it — the live frame in the title, the CI renderer on the step's line.
 
+## Log placement
+
+By default, `log`/`info`/`warn`/`error`/`success` write a permanent line above
+the whole frame — the complete record for the run, in order. `logPlacement`
+moves them somewhere more local instead:
+
+```ts
+new Script({ name: "checkout", logPlacement: "step" })
+```
+
+| `logPlacement` | where it lands |
+| --- | --- |
+| `"scrollback"` (default) | a permanent line above the frame — the full run, in order |
+| `"step"` | nested under the step that logged it, beside its tasks and progress bar |
+| `"bottom"` | a rolling tail of the most recent lines, below the whole phase tree |
+
+```
+  ✖ Main                                                                  320ms
+     ✔ reserve inventory                                                  320ms
+       • checked warehouse A          ← "step": nested where it happened
+       • checked warehouse B
+     ✖ boom                                                                 0ms
+       boom
+```
+
+`"step"` and `"bottom"` both keep only the most recent few lines — they trade
+completeness for locality, which is exactly what makes a rollback's `log()`
+land next to the step it is undoing instead of scrolling past at the top.
+Reach for `"scrollback"` when the log is the thing you need to still have once
+the run is over. Only the live renderer honours this: the plain/CI renderer is
+already sequential, so every placement just prints each line immediately, in
+order, which is already both complete and in place.
+
+Run `npm run example:log-placement` to see the same script three times, once
+per placement.
+
 ## Step options
 
 ```ts
@@ -278,6 +314,7 @@ new Script<Input>({
   plain: undefined,      // force the CI renderer; default auto-detects a TTY
   silent: false,
   handleSignals: true,   // Ctrl-C aborts and compensates; a second one gives up
+  logPlacement: "scrollback", // "scrollback" | "step" | "bottom"
 })
 ```
 
@@ -315,16 +352,17 @@ error, not a runtime `undefined`.
 
 ## Examples
 
-Six runnable scripts, each aimed at a different part of the API. Most take a
+Seven runnable scripts, each aimed at a different part of the API. Most take a
 flag to switch between the happy path and the interesting one.
 
 | | |
 | --- | --- |
 | [`deploy.ts`](examples/deploy.ts) | The tour: phases, progress bars, checklists, retry, `note`, `clean`, rollback. `npm run example`, `npm run example:fail` |
-| [`checkout.ts`](examples/checkout.ts) | Saga semantics end to end — three mutations, three compensations, and a secret dropped from the context with `clean`. `-- --ok` for the happy path |
+| [`checkout.ts`](examples/checkout.ts) | Saga semantics end to end — three mutations, three compensations, a secret dropped with `clean`, and `logPlacement: "step"` nesting each rollback's log under the step it undoes. `-- --ok` for the happy path |
 | [`resilience.ts`](examples/resilience.ts) | `retry` with backoff, `retryIf` refusing to retry a 401, `timeoutMs` on a hung step, and an external `AbortSignal`. `-- --timeout`, `-- --fatal`, `-- --cancel` |
 | [`intake.ts`](examples/intake.ts) | `defineInput` with a hand-rolled Standard Schema, plus the full handler UI surface. `-- --bad` to watch validation reject the run, `-- --dirty` for a failing checklist item |
 | [`modular.ts`](examples/modular.ts) | `stepFor` steps living in [`steps/tenancy.ts`](examples/steps/tenancy.ts), shared by two unrelated scripts — the imported rollback compensates in both. `-- --fail` |
+| [`log-placement.ts`](examples/log-placement.ts) | The same script run three times, once per `logPlacement` value, so the difference is visible directly |
 | [`validate.ts`](examples/validate.ts) | The smallest thing that runs: two steps, `rollback: "none"` |
 
 ```
@@ -332,6 +370,7 @@ npm run example:checkout -- --ok
 npm run example:resilience -- --cancel
 npm run example:intake -- --bad
 npm run example:modular -- --fail
+npm run example:log-placement
 ```
 
 ## npm scripts

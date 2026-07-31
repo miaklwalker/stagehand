@@ -28,6 +28,7 @@ function stepState(extra: Partial<StepState> = {}): StepState {
     status: "success",
     attempts: 1,
     tasks: [],
+    logs: [],
     hasRollback: false,
     startedAt: 0,
     endedAt: 10,
@@ -44,6 +45,7 @@ function runState(step: StepState): RunState {
     startedAt: 0,
     rollbackCount: 0,
     rollbackFailures: 0,
+    logTail: [],
   };
 }
 
