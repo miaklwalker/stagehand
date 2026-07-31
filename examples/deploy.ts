@@ -58,6 +58,8 @@ const deploy = new Script<Input>({
   .addStep({
     name: "compile bundle",
     timeoutMs: 15_000,
+    // the package count was only interesting while installing
+    clean: ["packages"],
     handler: async ({ tasks, status }) => {
       const list = tasks(["typecheck", "transform", "minify", "write manifest"]);
 
@@ -85,9 +87,11 @@ const deploy = new Script<Input>({
       bar.done();
       return { uploadId: "up_8812" };
     },
-    rollback: async ({ output, log }) => {
+    // ask for the one context key the compensation needs; nothing may clean it
+    rollbackKeys: ["sha"],
+    rollback: async ({ ctx, output, log }) => {
       await wait(200);
-      log(`deleted artifact ${output.uploadId}`);
+      log(`deleted artifact ${output.uploadId} built from ${ctx.sha}`);
     },
   })
   .addStep({
@@ -119,8 +123,8 @@ const result = await deploy.run({
 });
 
 if (result.ok) {
-  // `result.ctx` is fully typed: sha, branch, actor, canDeploy, packages,
-  // artifact, bytes, uploadId, releaseId.
+  // `result.ctx` is fully typed: sha, branch, actor, canDeploy, artifact,
+  // bytes, uploadId, releaseId — `packages` was cleaned away mid-run.
   console.log(`\n  released ${result.ctx.releaseId} from ${result.ctx.sha}\n`);
 } else {
   process.exitCode = 1;

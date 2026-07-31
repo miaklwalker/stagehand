@@ -1,8 +1,16 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { createRollbackContext, createStepContext } from "./context.js";
-import { ScriptAbortedError, SchemaValidationError, StepTimeoutError, isAbort } from "./errors.js";
+import {
+  ScriptAbortedError,
+  SchemaValidationError,
+  StepDefinitionError,
+  StepTimeoutError,
+  isAbort,
+} from "./errors.js";
 import type { PhaseState, RunState, StepState } from "./state.js";
 import type {
+  CleanField,
+  Cleaned,
   Merge,
   PhaseOptions,
   Prettify,
@@ -19,7 +27,17 @@ import { createRenderer, type Renderer } from "./ui/renderer.js";
 /* Internal definition storage (type-erased; the public API keeps the types)   */
 /* -------------------------------------------------------------------------- */
 
-type AnyStepDef = StepDef<unknown, unknown, unknown>;
+interface AnyStepDef {
+  name: string;
+  description?: string;
+  handler: (context: unknown) => unknown;
+  rollbackKeys?: readonly string[];
+  rollback?: (context: unknown) => unknown;
+  clean?: readonly string[];
+  when?: (context: { input: unknown; ctx: unknown }) => unknown;
+  retry?: RetryPolicy;
+  timeoutMs?: number;
+}
 
 interface PhaseDefinition {
   name: string;
@@ -65,10 +83,14 @@ export interface RunOptions {
  *   })
  *   .run({ userId: "u_1" });
  * ```
+ *
+ * The third parameter is inferred too: it collects the keys steps reserved
+ * through `rollbackKeys`, which is how `clean` knows what it may not remove.
  */
-export class Script<In = void, Ctx extends object = {}> {
+export class Script<In = void, Ctx extends object = {}, Reserved extends PropertyKey = never> {
   private readonly options: ScriptOptions;
   private readonly definition: PhaseDefinition[] = [];
+  private readonly reserved = new Set<string>();
   private _schema: StandardSchemaV1 | undefined;
 
   constructor(options: ScriptOptions | string = {}) {
@@ -95,9 +117,9 @@ export class Script<In = void, Ctx extends object = {}> {
    *   });
    * ```
    */
-  defineInput<TSchema>(schema: StandardSchemaV1<unknown, TSchema>): Script<TSchema, Ctx> {
+  defineInput<TSchema>(schema: StandardSchemaV1<unknown, TSchema>): Script<TSchema, Ctx, Reserved> {
     this._schema = schema as StandardSchemaV1;
-    return this as unknown as Script<TSchema, Ctx>;
+    return this as unknown as Script<TSchema, Ctx, Reserved>;
   }
 
   /** Validate `input` against the schema from `defineInput`, if any. */
@@ -109,17 +131,17 @@ export class Script<In = void, Ctx extends object = {}> {
   }
 
   /** Open a new phase. Subsequent `addStep` calls land in it. */
-  addPhase(name: string, options?: PhaseOptions<In, Ctx>): Script<In, Ctx>;
+  addPhase(name: string, options?: PhaseOptions<In, Ctx>): Script<In, Ctx, Reserved>;
   /** Open a phase and populate it inside a callback, keeping the type flow. */
-  addPhase<Next extends object>(
+  addPhase<Next extends object, NextReserved extends PropertyKey>(
     name: string,
-    build: (script: Script<In, Ctx>) => Script<In, Next>,
-  ): Script<In, Next>;
-  addPhase<Next extends object>(
+    build: (script: Script<In, Ctx, Reserved>) => Script<In, Next, NextReserved>,
+  ): Script<In, Next, NextReserved>;
+  addPhase<Next extends object, NextReserved extends PropertyKey>(
     name: string,
     options: PhaseOptions<In, Ctx>,
-    build: (script: Script<In, Ctx>) => Script<In, Next>,
-  ): Script<In, Next>;
+    build: (script: Script<In, Ctx, Reserved>) => Script<In, Next, NextReserved>,
+  ): Script<In, Next, NextReserved>;
   addPhase(
     name: string,
     optionsOrBuild?: PhaseOptions<In, Ctx> | ((script: never) => unknown),
@@ -142,11 +164,42 @@ export class Script<In = void, Ctx extends object = {}> {
 
   /**
    * Append a step to the current phase. Whatever the handler resolves to is
-   * merged into the context and becomes visible to every later step.
+   * merged into the context and becomes visible to every later step; whatever
+   * it lists in `clean` is dropped from both.
+   *
+   * @throws {StepDefinitionError} if `clean` names a key reserved by some
+   * step's `rollbackKeys`.
    */
-  addStep<Out extends object | void>(def: StepDef<In, Ctx, Out>): Script<In, Merge<Ctx, Out>> {
-    this.currentPhase().steps.push(def as unknown as AnyStepDef);
-    return this as unknown as Script<In, Merge<Ctx, Out>>;
+  addStep<
+    Out extends object | void,
+    const RollbackKeys extends readonly PropertyKey[] = readonly [],
+    const CleanKeys extends readonly PropertyKey[] = readonly [],
+  >(
+    def: StepDef<In, Ctx, Out, RollbackKeys> & CleanField<Ctx, Reserved, CleanKeys>,
+  ): Script<In, Cleaned<Merge<Ctx, Out>, CleanKeys[number]>, Reserved | RollbackKeys[number]> {
+    const step = def as unknown as AnyStepDef;
+    const rollbackKeys = step.rollbackKeys ?? [];
+
+    // A reserved key has to survive until a rollback might read it, so no step
+    // — this one included — is allowed to clean it away.
+    const conflicts = (step.clean ?? []).filter(
+      (key) => this.reserved.has(key) || rollbackKeys.includes(key),
+    );
+    if (conflicts.length > 0) {
+      throw new StepDefinitionError(
+        step.name,
+        `Step "${step.name}" cannot clean ${conflicts.map((key) => `"${key}"`).join(", ")}: ` +
+          `reserved by rollbackKeys`,
+      );
+    }
+    for (const key of rollbackKeys) this.reserved.add(key);
+
+    this.currentPhase().steps.push(step);
+    return this as unknown as Script<
+      In,
+      Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
+      Reserved | RollbackKeys[number]
+    >;
   }
 
   /** Every step name, in execution order — handy for tests and docs. */
@@ -235,6 +288,7 @@ export class Script<In = void, Ctx extends object = {}> {
         if (phase.options.when && !(await phase.options.when({ input, ctx }))) {
           for (const item of phaseSteps) {
             item.state.status = "skipped";
+            drop(ctx, item.def.clean);
             renderer.onStepEnd(item.state);
           }
           renderer.refresh();
@@ -253,6 +307,7 @@ export class Script<In = void, Ctx extends object = {}> {
 
           if (item.def.when && !(await item.def.when({ input, ctx }))) {
             item.state.status = "skipped";
+            drop(ctx, item.def.clean);
             renderer.onStepEnd(item.state);
             renderer.refresh();
             continue;
@@ -271,6 +326,10 @@ export class Script<In = void, Ctx extends object = {}> {
             if (output !== null && typeof output === "object") {
               Object.assign(ctx, output);
             }
+            // The step said it is done with these; later steps neither see
+            // them at runtime nor have them in their context type. `output`
+            // keeps its own copy, so this step's rollback is unaffected.
+            drop(ctx, item.def.clean);
             completed.push({ runtime: item, output });
             renderer.onStepEnd(item.state);
             renderer.refresh();
@@ -442,7 +501,9 @@ export class Script<In = void, Ctx extends object = {}> {
         const context = createRollbackContext(
           { renderer, step: entry.runtime.state, phaseName: entry.runtime.phaseName },
           input,
-          ctx,
+          // Only what the step asked for — nothing by default. Reserved keys
+          // can never be cleaned, so they are all still here.
+          pick(ctx, entry.runtime.def.rollbackKeys),
           entry.output,
           failure.error,
           signal,
@@ -508,6 +569,22 @@ export class Script<In = void, Ctx extends object = {}> {
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
 
+/** Delete a step's `clean` keys from the live context, in place. */
+function drop(ctx: object, keys: readonly string[] | undefined): void {
+  if (!keys) return;
+  for (const key of keys) delete (ctx as Record<string, unknown>)[key];
+}
+
+/** The `rollbackKeys` slice of the context — `{}` when none were declared. */
+function pick(ctx: object, keys: readonly string[] | undefined): Record<string, unknown> {
+  const picked: Record<string, unknown> = {};
+  if (!keys) return picked;
+  for (const key of keys) {
+    if (key in ctx) picked[key] = (ctx as Record<string, unknown>)[key];
+  }
+  return picked;
+}
+
 function resolveDelay(retry: RetryPolicy | undefined, attempt: number): number {
   const delay = retry?.delayMs;
   if (typeof delay === "function") return Math.max(0, delay(attempt));
@@ -557,9 +634,14 @@ function abortRejection(signal: AbortSignal): { promise: Promise<never>; dispose
  *   handler: async ({ ctx }) => ({ verified: ctx.user.id }),
  * });
  * ```
+ *
+ * `rollbackKeys` works the same here, and the keys it names stay reserved once
+ * the step is handed to `addStep`.
  */
 export function stepFor<In, Ctx extends object = {}>() {
-  return <Out extends object | void>(def: StepDef<In, Ctx, Out>): StepDef<In, Ctx, Out> => def;
+  return <Out extends object | void, const RollbackKeys extends readonly PropertyKey[] = readonly []>(
+    def: StepDef<In, Ctx, Out, RollbackKeys>,
+  ): StepDef<In, Ctx, Out, RollbackKeys> => def;
 }
 
 /** Convenience factory so callers can skip `new`. */

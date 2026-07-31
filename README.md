@@ -6,6 +6,7 @@ A fully typesafe, saga-style script framework for TypeScript, with a live termin
 - **Phases** are a collection of **steps**.
 - **Steps** have a `handler` and an optional `rollback` that fires when a *later* step fails.
 - Whatever a handler returns is merged into a **typed context** that every later step can read.
+- A step can `clean` keys it is done with, and a `rollback` declares the keys it needs.
 - Zero runtime dependencies. Live rendering on a TTY, plain line output in CI.
 
 ```ts
@@ -27,8 +28,9 @@ const result = await new Script<{ service: string }>({ name: "deploy" })
 
       return { uploadId: await upload(ctx.sha, bar) };
     },
-    rollback: async ({ output }) => cdn.delete(output.uploadId),
-    //                  ^ typed as { uploadId: string }
+    rollbackKeys: ["sha"],
+    rollback: async ({ ctx, output }) => cdn.delete(output.uploadId, ctx.sha),
+    //                  ^ { sha: string }   ^ typed as { uploadId: string }
   })
   .run({ service: "api" });
 
@@ -86,6 +88,47 @@ Reaching for a key a previous step did not produce is a compile error, as is
 reading the wrong shape in a `rollback`. A handler that returns nothing leaves
 the context unchanged.
 
+## Cleaning the context
+
+If a step produces — or receives — data that later steps do not need, listing
+those keys in `clean` deletes them from the context at runtime **and** removes
+them from the type that flows on:
+
+```ts
+new Script<{ password: string; email: string }>({ name: "signup" })
+  .addStep({
+    name: "read input",
+    handler: ({ input }) => ({ ...input }),
+  })
+  .addStep({
+    name: "hash",
+    handler: async ({ ctx }) => ({ hash: await hashIt(ctx.password) }),
+    clean: ["password"],   // not needed past this point
+  })
+  .addStep({
+    name: "persist",
+    handler: ({ ctx }) => {
+      ctx.hash;      // string
+      ctx.email;     // string
+      ctx.password;  // compile error — cleaned away
+    },
+  });
+```
+
+Rules:
+
+- Keys are checked against the context as it stands *entering* that step — an
+  unknown key is a compile error, and the editor autocompletes the valid ones.
+  A step cannot clean a key it produces itself; that key does not exist yet
+  when `clean` is read.
+- A key reserved by any step's `rollbackKeys` can never be cleaned, by that
+  step or any later one. Trying to throws `StepDefinitionError` from `addStep`,
+  while the script is being built, before anything runs.
+- `clean` is part of the declared shape, not of the work, so it applies even
+  when the step is skipped by `when` — runtime and types never disagree.
+- A step's own `output` is kept separately and is never cleaned, so its
+  `rollback` still sees everything the handler returned.
+
 ## Input from a schema
 
 `In` doesn't have to be written by hand either. `defineInput` takes any
@@ -122,6 +165,45 @@ A rollback that throws is recorded in `result.rollbacks` and surfaced in the
 summary; it never masks the original error, and the remaining rollbacks still
 run.
 
+### What a rollback can see
+
+A rollback always gets its own step's `output` in full. It gets **no context at
+all** by default — it has to ask, via `rollbackKeys`. Asking does two things: it
+narrows `ctx` inside the rollback to exactly those keys, and it reserves them,
+so neither that step nor any later one can `clean` them away. Whatever the
+rollback declared is therefore guaranteed to still be there if it ever runs.
+
+```ts
+new Script<{ accountId: string; amount: number }>({ name: "charge" })
+  .addStep({ name: "read input", handler: ({ input }) => ({ ...input }) })
+  .addStep({
+    name: "reserve funds",
+    handler: async ({ ctx }) => ({ reservationId: await reserve(ctx.accountId, ctx.amount) }),
+    rollbackKeys: ["accountId", "reservationId"],
+    rollback: async ({ ctx }) => {
+      // ctx is { accountId: string; reservationId: string } — and nothing else
+      await release(ctx.accountId, ctx.reservationId);
+    },
+  })
+  .addStep({
+    name: "charge card",
+    handler: () => {
+      throw new Error("payment gateway timeout");
+    },
+  });
+```
+
+`rollbackKeys` accepts the step's incoming context keys and its own output keys;
+anything else is a compile error. Cleaning a reserved key is a compile error
+too, and throws `StepDefinitionError` at build time:
+
+```ts
+script
+  .addStep({ name: "one", handler: () => {}, rollbackKeys: ["a"], rollback: async () => {} })
+  .addStep({ name: "two", handler: () => {}, clean: ["a"] });
+  //                                          ^ StepDefinitionError: reserved by rollbackKeys
+```
+
 ## The handler surface
 
 Every handler receives one object:
@@ -138,8 +220,9 @@ Every handler receives one object:
 | `task(label)` | one nested checklist item → `succeed` / `fail` / `skip` |
 | `tasks([...] as const)` | a whole checklist, keyed for typed lookup |
 
-`rollback` receives the same, plus `output` (that step's own return value) and
-`error` (what triggered the unwind).
+`rollback` receives `input`, `signal`, `phase`, `step`, `log`, `status` and
+`progress`, plus `output` (that step's own return value) and `error` (what
+triggered the unwind). Its `ctx` holds only the keys named in `rollbackKeys`.
 
 ## Step options
 
@@ -150,6 +233,8 @@ Every handler receives one object:
   when: ({ input, ctx }) => input.env === "production",
   retry: { attempts: 3, delayMs: (attempt) => attempt * 250, retryIf: isTransient },
   timeoutMs: 30_000,
+  clean: ["draftId"],          // drop from the context once this step settles
+  rollbackKeys: ["tagName"],   // the context keys `rollback` needs, and reserves
   handler,
   rollback,
 })
@@ -191,8 +276,13 @@ type RunResult<Ctx> =
 export const verifyId = stepFor<Input, { user: User }>()({
   name: "verify id",
   handler: async ({ ctx }) => ({ verified: ctx.user.id }),
+  rollbackKeys: ["verified"],
+  rollback: async ({ ctx }) => unverify(ctx.verified),
 });
 ```
+
+`rollbackKeys` narrows the rollback here exactly as it does inline, and the keys
+stay reserved once the step is handed to `addStep`.
 
 ## Scripts
 

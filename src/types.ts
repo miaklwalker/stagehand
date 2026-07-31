@@ -13,6 +13,48 @@ export type Merge<Ctx, Out> = [Out] extends [void]
     ? Ctx
     : Prettify<Omit<Ctx, keyof Out> & Out>;
 
+/**
+ * Context with `Keys` dropped — what `clean` leaves behind for later steps.
+ */
+export type Cleaned<Ctx, Keys extends PropertyKey> = Prettify<Omit<Ctx, Keys>>;
+
+/**
+ * The slice of the context a `rollback` sees: exactly the keys it asked for
+ * via `rollbackKeys`, and nothing else. With no keys declared it is `{}` — a
+ * rollback has to say what it needs.
+ */
+export type RollbackData<Ctx, Keys extends readonly PropertyKey[]> = Pick<
+  Ctx,
+  Extract<Keys[number], keyof Ctx>
+>;
+
+/**
+ * The optional `clean` field, mixed into a step definition by `addStep`.
+ *
+ * `Keys` captures the literal tuple so the caller's context type can be
+ * narrowed by exactly the keys listed. The value is checked element-wise — a
+ * valid key checks against itself, an invalid one against the union of valid
+ * keys — so only the offending entry is flagged and the editor still
+ * autocompletes. `Reserved` holds the keys earlier `rollbackKeys` declarations
+ * locked down; they are excluded from the valid set.
+ */
+export type CleanField<
+  Ctx,
+  Reserved extends PropertyKey,
+  Keys extends readonly PropertyKey[],
+> = {
+  /**
+   * Keys of the incoming context this step is done with. They are deleted from
+   * the context once the step settles and disappear from the type every later
+   * step sees.
+   */
+  clean?: {
+    [I in keyof Keys]: Keys[I] extends Exclude<keyof Ctx, Reserved>
+      ? Keys[I]
+      : Exclude<keyof Ctx, Reserved>;
+  };
+};
+
 export type StepStatus =
   | "pending"
   | "running"
@@ -94,7 +136,10 @@ export interface StepContext<In, Ctx> {
 
 export interface RollbackContext<In, Ctx, Out> {
   readonly input: In;
-  /** Context as it stood when the failure happened. */
+  /**
+   * Only the keys this step declared in `rollbackKeys`, as they stood when the
+   * failure happened. Empty when none were declared.
+   */
   readonly ctx: Ctx;
   /** Exactly what this step's handler returned. */
   readonly output: Out;
@@ -121,7 +166,12 @@ export interface RetryPolicy {
   retryIf?: (error: unknown, attempt: number) => boolean;
 }
 
-export interface StepDef<In, Ctx, Out> {
+export interface StepDef<
+  In,
+  Ctx,
+  Out,
+  RollbackKeys extends readonly PropertyKey[] = readonly [],
+> {
   name: string;
   description?: string;
   /**
@@ -130,10 +180,22 @@ export interface StepDef<In, Ctx, Out> {
    */
   handler: (context: StepContext<In, Ctx>) => Awaitable<Out>;
   /**
+   * The context keys this step's `rollback` needs. It receives only these
+   * (none by default), and declaring them reserves them: neither this step nor
+   * any later one may `clean` them away, so they are guaranteed to still be
+   * there if the rollback runs.
+   *
+   * `output` is unaffected — a rollback always gets its own step's return
+   * value in full, whether or not it was cleaned from the context.
+   */
+  rollbackKeys?: RollbackKeys & readonly (keyof Merge<Ctx, Out>)[];
+  /**
    * Compensation. Runs when a *later* step fails, in reverse order, after this
    * step has already succeeded.
    */
-  rollback?: (context: RollbackContext<In, Ctx, Out>) => Awaitable<void>;
+  rollback?: (
+    context: RollbackContext<In, Prettify<RollbackData<Merge<Ctx, Out>, RollbackKeys>>, Out>,
+  ) => Awaitable<void>;
   /** Skip the step (and its rollback) when this resolves falsy. */
   when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
   retry?: RetryPolicy;

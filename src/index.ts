@@ -4,6 +4,7 @@ export {
   RollbackFailedError,
   SchemaValidationError,
   ScriptAbortedError,
+  StepDefinitionError,
   StepFailedError,
   StepTimeoutError,
   isAbort,
@@ -11,6 +12,8 @@ export {
 
 export type {
   Awaitable,
+  CleanField,
+  Cleaned,
   Merge,
   PhaseOptions,
   PhaseStatus,
@@ -18,6 +21,7 @@ export type {
   ProgressHandle,
   RetryPolicy,
   RollbackContext,
+  RollbackData,
   RollbackReport,
   RunResult,
   RunStatus,

@@ -22,6 +22,21 @@ export class SchemaValidationError extends Error {
   }
 }
 
+/**
+ * A step was declared in a way the script cannot honour — today, a `clean`
+ * naming a key some step reserved through `rollbackKeys`. Thrown by `addStep`,
+ * while the script is being built, long before anything runs.
+ */
+export class StepDefinitionError extends Error {
+  readonly step: string;
+
+  constructor(step: string, message: string) {
+    super(message);
+    this.name = "StepDefinitionError";
+    this.step = step;
+  }
+}
+
 /** A step's handler threw. `cause` holds whatever it actually threw. */
 export class StepFailedError extends Error {
   readonly phase: string;
