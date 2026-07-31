@@ -18,6 +18,8 @@ export interface StepState {
   phaseIndex: number;
   status: StepStatus;
   statusText?: string;
+  /** Persistent annotation rendered next to the name; outlives the run. */
+  note?: string;
   startedAt?: number;
   endedAt?: number;
   attempts: number;

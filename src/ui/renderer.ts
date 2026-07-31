@@ -178,7 +178,8 @@ export class PlainRenderer implements Renderer {
               ? symbols.failure
               : symbols.info;
     const suffix = step.error === undefined ? "" : `  ${errorMessage(step.error)}`;
-    this.stream.write(`  ${icon} ${step.name}${time}${suffix}\n`);
+    const note = step.note ? ` (${step.note})` : "";
+    this.stream.write(`  ${icon} ${step.name}${note}${time}${suffix}\n`);
   }
 
   stop(): void {

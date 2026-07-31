@@ -106,6 +106,13 @@ export interface ContextDeps {
   phaseName: string;
 }
 
+/** Set (or, given "", clear) the step's persistent title annotation. */
+function annotate(step: StepState, renderer: Renderer, message: string): void {
+  if (message === "") delete step.note;
+  else step.note = message;
+  renderer.refresh();
+}
+
 export function createStepContext<In, Ctx>(
   deps: ContextDeps,
   input: In,
@@ -132,6 +139,7 @@ export function createStepContext<In, Ctx>(
       step.statusText = message;
       renderer.refresh();
     },
+    note: (message) => annotate(step, renderer, message),
     progress: (options) => createProgress(step, renderer, options),
     task: (label) => createTask(step, renderer, label),
     tasks: (labels) => createTaskList(step, renderer, labels),
@@ -160,6 +168,7 @@ export function createRollbackContext<In, Ctx, Out>(
       step.statusText = message;
       renderer.refresh();
     },
+    note: (message) => annotate(step, renderer, message),
     progress: (options) => createProgress(step, renderer, options),
   };
 }

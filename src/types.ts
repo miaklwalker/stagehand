@@ -124,6 +124,14 @@ export interface StepContext<In, Ctx> {
   /** Transient one-liner shown beside the step. Replaced on each call. */
   status(message: string): void;
 
+  /**
+   * Annotate the step's title — `query database (400 rows found)`. Unlike
+   * `status`, it survives the step finishing, so it is what to use for the
+   * one fact worth reading off the finished line. Replaced on each call;
+   * pass `""` to remove it.
+   */
+  note(message: string): void;
+
   /** Attach a progress bar to this step. */
   progress(options: { total: number; label?: string; value?: number }): ProgressHandle;
 
@@ -151,6 +159,8 @@ export interface RollbackContext<In, Ctx, Out> {
 
   log(message: string): void;
   status(message: string): void;
+  /** Annotate the step's title, as in a handler. Replaces whatever it set. */
+  note(message: string): void;
   progress(options: { total: number; label?: string; value?: number }): ProgressHandle;
 }
 
