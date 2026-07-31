@@ -17,9 +17,13 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc && npm run build && tsc -p examples && tsc -p test && tsc -p scripts",
+    "typecheck": "tsc && npm run build && tsc -p examples && tsc -p test",
     "example": "npm run build && node --experimental-strip-types examples/deploy.ts",
     "example:fail": "npm run build && node --experimental-strip-types examples/deploy.ts --fail",
+    "example:checkout": "npm run build && node --experimental-strip-types examples/checkout.ts",
+    "example:resilience": "npm run build && node --experimental-strip-types examples/resilience.ts",
+    "example:intake": "npm run build && node --experimental-strip-types examples/intake.ts",
+    "example:modular": "npm run build && node --experimental-strip-types examples/modular.ts",
     "test": "npm run build && node --experimental-strip-types --test test/*.test.ts",
     "release": "release-it"
   },

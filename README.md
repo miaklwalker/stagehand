@@ -48,7 +48,7 @@ if (result.ok) result.ctx.uploadId; // string
      ✔ check permissions                                                   517ms
 
   ⠸ Build                                                                   17.7s
-     ✔ install dependencies                                                 14.4s
+     ✔ install dependencies (428 packages)                                  14.4s
      ⠸ compile bundle  › transform                                           3.3s
        ▕██████████████░░░░░░░░░░▏  58%  412/710  src/router.ts
        ✔ typecheck
@@ -215,14 +215,38 @@ Every handler receives one object:
 | `signal` | aborts on timeout, Ctrl-C, or an external signal |
 | `attempt` | 1-based, useful with `retry` |
 | `log` / `info` / `warn` / `error` / `success` | permanent lines above the live frame |
-| `status(text)` | transient one-liner beside the step |
+| `status(text)` | transient one-liner beside the step, cleared when it settles |
+| `note(text)` | annotates the step title — `(400 rows found)` — and stays |
 | `progress({ total, label })` | a progress bar → `update` / `increment` / `setTotal` / `done` |
 | `task(label)` | one nested checklist item → `succeed` / `fail` / `skip` |
 | `tasks([...] as const)` | a whole checklist, keyed for typed lookup |
 
-`rollback` receives `input`, `signal`, `phase`, `step`, `log`, `status` and
-`progress`, plus `output` (that step's own return value) and `error` (what
+`rollback` receives `input`, `signal`, `phase`, `step`, `log`, `status`, `note`
+and `progress`, plus `output` (that step's own return value) and `error` (what
 triggered the unwind). Its `ctx` holds only the keys named in `rollbackKeys`.
+
+### `status` vs `note`
+
+Both write next to the step name, and they differ in lifetime. `status` is
+scratch space for a step in flight — it is wiped the moment the step settles.
+`note` is part of the title: it is written once and stays on the finished line,
+which is where a count, a size, or an id belongs.
+
+```ts
+.addStep({
+  name: "query database",
+  handler: async ({ status, note }) => {
+    status("scanning");            // ⠸ query database  › scanning
+    const rows = await db.all(sql);
+    note(`${rows.length} rows found`);
+    return { rows };
+  },
+})
+// ✔ query database (400 rows found)                                    1.2s
+```
+
+Calling `note` again replaces the text; `note("")` removes it. Both renderers
+show it — the live frame in the title, the CI renderer on the step's line.
 
 ## Step options
 
@@ -284,15 +308,41 @@ export const verifyId = stepFor<Input, { user: User }>()({
 `rollbackKeys` narrows the rollback here exactly as it does inline, and the keys
 stay reserved once the step is handed to `addStep`.
 
-## Scripts
+`addStep` is where the requirement is enforced: TypeScript checks that the
+script has actually produced `Ctx` by that point. Dropping a step that needs
+`{ user: User }` into a script that has not loaded a user yet is a compile
+error, not a runtime `undefined`.
+
+## Examples
+
+Six runnable scripts, each aimed at a different part of the API. Most take a
+flag to switch between the happy path and the interesting one.
+
+| | |
+| --- | --- |
+| [`deploy.ts`](examples/deploy.ts) | The tour: phases, progress bars, checklists, retry, `note`, `clean`, rollback. `npm run example`, `npm run example:fail` |
+| [`checkout.ts`](examples/checkout.ts) | Saga semantics end to end — three mutations, three compensations, and a secret dropped from the context with `clean`. `-- --ok` for the happy path |
+| [`resilience.ts`](examples/resilience.ts) | `retry` with backoff, `retryIf` refusing to retry a 401, `timeoutMs` on a hung step, and an external `AbortSignal`. `-- --timeout`, `-- --fatal`, `-- --cancel` |
+| [`intake.ts`](examples/intake.ts) | `defineInput` with a hand-rolled Standard Schema, plus the full handler UI surface. `-- --bad` to watch validation reject the run, `-- --dirty` for a failing checklist item |
+| [`modular.ts`](examples/modular.ts) | `stepFor` steps living in [`steps/tenancy.ts`](examples/steps/tenancy.ts), shared by two unrelated scripts — the imported rollback compensates in both. `-- --fail` |
+| [`validate.ts`](examples/validate.ts) | The smallest thing that runs: two steps, `rollback: "none"` |
+
+```
+npm run example:checkout -- --ok
+npm run example:resilience -- --cancel
+npm run example:intake -- --bad
+npm run example:modular -- --fail
+```
+
+## npm scripts
 
 ```
 npm run build       # emit dist/
 npm test            # node:test suite
-npm run typecheck   # library + examples + tests + scripts
+npm run typecheck   # library + examples + tests
 npm run example     # the happy path, live
 npm run example:fail
-npm run release     # dry run of the publish pipeline
+npm run release     # release-it: version, tag, publish
 ```
 
 ## TypeScript layout
@@ -305,66 +355,15 @@ is invisible to them, so the IDE and the CLI disagree.
 | --- | --- | --- |
 | `tsconfig.json` | `src` | The library. `noEmit`, strict. |
 | `tsconfig.build.json` | `src` | The only config that emits `dist/`. |
-| `examples/tsconfig.json` | `examples` | Imports the built `dist/`. |
-| `test/tsconfig.json` | `test` | Same. |
-| `scripts/tsconfig.json` | `scripts` | Adds `allowImportingTsExtensions`. |
+| `examples/tsconfig.json` | `examples` | Imports the built `dist/`; adds `allowImportingTsExtensions`. |
+| `test/tsconfig.json` | `test` | Same, without the flag. |
 
-Only `scripts/` needs that last flag. Node's type stripping does not rewrite
-import extensions, so a script importing a sibling script must write
-`./exec.ts` rather than `./exec.js`. The flag cannot go in the root config:
-`tsconfig.build.json` extends it and sets `noEmit: false`, and TypeScript
-rejects `allowImportingTsExtensions` unless `noEmit` or `emitDeclarationOnly`
-is set (TS5096).
-
-## The release pipeline
-
-`scripts/release.ts` builds and publishes this package, and is itself written
-with this framework — the pipeline is the integration test.
-
-```
-npm run release                              # dry run; mutates nothing
-npm run release -- --simulate-failure        # rehearse the rollback path
-npm run release -- --publish                 # for real
-npm run release -- --publish --bump minor
-npm run release -- --publish --version 1.0.0 --tag next
-```
-
-| Phase | Steps |
-| --- | --- |
-| Preflight | read manifest · authenticate npm · inspect git · resolve version · check registry |
-| Verify | typecheck · run tests |
-| Package | write version · clean dist · build · verify artifacts · audit tarball |
-| Publish | tag release · push tag · publish to npm |
-
-Three steps compensate, and the ordering is deliberate — `publish to npm` is
-last, so a failure anywhere *before* it unwinds everything and nothing reaches
-the registry:
-
-| Step | Rollback |
-| --- | --- |
-| `write version` | restore the previous version in package.json |
-| `clean dist` | rebuild from source |
-| `tag release` | delete the local tag |
-| `push tag` | delete the remote tag |
-| `publish to npm` | `npm deprecate` — a published version cannot be recalled |
-
-`--simulate-failure` performs the local mutations and then fails at the publish
-step. Nothing leaves the machine, and you get to watch the unwind:
-
-```
-  ✖ publish to npm  0ms  simulated publish failure (--simulate-failure)
-    ▲ deleted local tag v0.2.0
-    ▲ dist rebuilt from source
-    ▲ package.json version restored to 0.1.0
-
-  ✖ Failed at Publish › publish to npm after 8.1s
-  ↺ Rolled back 3 steps
-```
-
-Other things it checks: a scoped package without `publishConfig.access`
-(`"public"`) would be published as restricted, so preflight refuses; the tarball
-is audited path-by-path against an allowlist so `src/` can never leak; and the
-version is checked against the registry before any work is done.
+Only `examples/` needs that flag, and only because `modular.ts` imports a
+sibling: Node's type stripping does not rewrite import extensions, so the
+import has to say `./steps/tenancy.ts` rather than `./steps/tenancy.js`. The
+flag cannot go in the root config — `tsconfig.build.json` extends it and sets
+`noEmit: false`, and TypeScript rejects `allowImportingTsExtensions` unless
+`noEmit` or `emitDeclarationOnly` is set (TS5096).
 
 ## Rendering notes
 

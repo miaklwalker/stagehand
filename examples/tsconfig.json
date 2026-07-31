@@ -1,4 +1,9 @@
 {
   "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // modular.ts imports a sibling by its real path (./steps/tenancy.ts),
+    // because Node's type stripping does not rewrite import extensions.
+    "allowImportingTsExtensions": true
+  },
   "include": ["."]
 }

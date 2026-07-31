@@ -114,6 +114,11 @@ function stepLines(step: StepState, tick: number, now: number, compact = false):
 
   let label = step.status === "pending" ? palette.faint(step.name) : step.name;
   if (step.status === "skipped") label = palette.faint(step.name);
+  // Part of the title, so it stays put once the step is done — unlike
+  // statusText, which is cleared the moment the step settles.
+  if (step.note) {
+    label += " " + palette.muted(`(${step.note})`);
+  }
   if (step.attempts > 1 && active) {
     label += palette.warning(` (retry ${step.attempts - 1})`);
   }

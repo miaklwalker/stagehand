@@ -44,14 +44,15 @@ const deploy = new Script<Input>({
   .addPhase("Build")
   .addStep({
     name: "install dependencies",
-    handler: async ({ progress, log }) => {
+    handler: async ({ progress, note }) => {
       const bar = progress({ total: 428, label: "resolving" });
       for (let i = 0; i <= 428; i += 17) {
         bar.update(i, i < 200 ? "resolving" : "linking");
         await wait(12);
       }
       bar.done();
-      log("428 packages installed");
+      // stays on the title once the step is green, unlike status()
+      note("428 packages");
       return { packages: 428 };
     },
   })
@@ -60,7 +61,7 @@ const deploy = new Script<Input>({
     timeoutMs: 15_000,
     // the package count was only interesting while installing
     clean: ["packages"],
-    handler: async ({ tasks, status }) => {
+    handler: async ({ tasks, status, note }) => {
       const list = tasks(["typecheck", "transform", "minify", "write manifest"]);
 
       for (const key of ["typecheck", "transform", "minify", "write manifest"] as const) {
@@ -71,7 +72,9 @@ const deploy = new Script<Input>({
         task.succeed();
       }
 
-      return { artifact: "dist/bundle.tar.gz", bytes: 4_182_233 };
+      const bytes = 4_182_233;
+      note(`${Math.round(bytes / 1024)}kB`);
+      return { artifact: "dist/bundle.tar.gz", bytes };
     },
   })
 
