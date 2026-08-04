@@ -3,6 +3,7 @@ import { frameWidth, palette, spinnerFrame, symbols } from "./theme.js";
 import {
   elapsed,
   errorMessage,
+  formatAge,
   formatDuration,
   phaseElapsed,
   phaseStatus,
@@ -40,6 +41,8 @@ function stepIcon(step: StepState, tick: number): string {
       return palette.error(symbols.failure);
     case "skipped":
       return palette.faint(symbols.skipped);
+    case "cached":
+      return palette.info(symbols.cached);
     case "rolling-back":
       return palette.warning(spinnerFrame(tick));
     case "rolled-back":
@@ -61,6 +64,8 @@ function phaseIcon(phase: PhaseState, tick: number): string {
       return palette.error(symbols.failure);
     case "skipped":
       return palette.faint(symbols.skipped);
+    case "cached":
+      return palette.info(symbols.cached);
   }
 }
 
@@ -77,6 +82,11 @@ function taskIcon(task: TaskState, tick: number): string {
     case "skipped":
       return palette.faint(symbols.skipped);
   }
+}
+
+/** `cached` on its own, or `cached • 6m ago` once an age is known. */
+function cachedBadge(ageMs: number | undefined): string {
+  return ageMs === undefined ? "cached" : `cached ${symbols.info} ${formatAge(ageMs)}`;
 }
 
 export function renderBar(progress: ProgressState, width = 24): string {
@@ -126,9 +136,11 @@ function stepLines(step: StepState, tick: number, now: number, compact = false):
       ? ""
       : step.status === "skipped"
         ? palette.faint("skipped")
-        : duration !== undefined
-          ? palette.faint(formatDuration(duration))
-          : "";
+        : step.status === "cached"
+          ? palette.info(cachedBadge(step.cacheAgeMs))
+          : duration !== undefined
+            ? palette.faint(formatDuration(duration))
+            : "";
 
   lines.push(row(`${STEP_INDENT}${stepIcon(step, tick)} ${label}`, right));
 
@@ -167,10 +179,17 @@ function stepLines(step: StepState, tick: number, now: number, compact = false):
 }
 
 function collapsedPhaseLine(phase: PhaseState, tick: number, now: number): string {
-  const done = phase.steps.filter((s) => s.status === "success").length;
+  const done = phase.steps.filter(
+    (s) => s.status === "success" || s.status === "cached",
+  ).length;
   const summary = palette.faint(`${done}/${phase.steps.length} steps`);
   const duration = phaseElapsed(phase, now);
-  const right = duration !== undefined ? palette.faint(formatDuration(duration)) : "";
+  const right =
+    phaseStatus(phase) === "cached"
+      ? palette.info(cachedBadge(phase.cacheAgeMs))
+      : duration !== undefined
+        ? palette.faint(formatDuration(duration))
+        : "";
   return row(
     `${PHASE_INDENT}${phaseIcon(phase, tick)} ${palette.muted(phase.name)}  ${summary}`,
     right,
@@ -212,7 +231,11 @@ function phaseLines(
   const name = status === "pending" ? palette.faint(phase.name) : palette.bold(phase.name);
   const duration = phaseElapsed(phase, now);
   const right =
-    status === "pending" || duration === undefined ? "" : palette.faint(formatDuration(duration));
+    status === "cached"
+      ? palette.info(cachedBadge(phase.cacheAgeMs))
+      : status === "pending" || duration === undefined
+        ? ""
+        : palette.faint(formatDuration(duration));
 
   const lines = [row(`${PHASE_INDENT}${phaseIcon(phase, tick)} ${name}`, right)];
   if (mode === "full" && phase.description && status !== "pending") {
@@ -317,6 +340,7 @@ export function renderSummary(state: RunState, now: number): string[] {
   const allSteps = state.phases.flatMap((p) => p.steps);
   const succeeded = allSteps.filter((s) => s.status === "success").length;
   const skipped = allSteps.filter((s) => s.status === "skipped").length;
+  const cached = allSteps.filter((s) => s.status === "cached").length;
   const total = (state.endedAt ?? now) - state.startedAt;
 
   if (state.status === "success") {
@@ -326,6 +350,7 @@ export function renderSummary(state: RunState, now: number): string[] {
       ),
     );
     const parts = [`${succeeded} steps`, `${state.phases.length} phases`];
+    if (cached > 0) parts.push(`${cached} cached`);
     if (skipped > 0) parts.push(`${skipped} skipped`);
     lines.push(row(`${GUTTER}  ${palette.faint(parts.join(` ${symbols.info} `))}`));
   } else {

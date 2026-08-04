@@ -194,14 +194,17 @@ export class PlainRenderer implements Renderer {
         ? symbols.success
         : step.status === "skipped"
           ? symbols.skipped
-          : step.status === "rolled-back"
-            ? symbols.rolledBack
-            : step.status === "failed" || step.status === "rollback-failed"
-              ? symbols.failure
-              : symbols.info;
+          : step.status === "cached"
+            ? symbols.cached
+            : step.status === "rolled-back"
+              ? symbols.rolledBack
+              : step.status === "failed" || step.status === "rollback-failed"
+                ? symbols.failure
+                : symbols.info;
     const suffix = step.error === undefined ? "" : `  ${errorMessage(step.error)}`;
     const note = step.note ? ` (${step.note})` : "";
-    this.stream.write(`  ${icon} ${step.name}${note}${time}${suffix}\n`);
+    const cached = step.status === "cached" ? "  cached" : "";
+    this.stream.write(`  ${icon} ${step.name}${note}${cached}${time}${suffix}\n`);
   }
 
   stop(): void {

@@ -1,3 +1,5 @@
+import type { StandardSchemaV1 } from "@standard-schema/spec";
+
 export type Awaitable<T> = T | Promise<T>;
 
 /** Flattens intersections so hover tooltips show a real object shape. */
@@ -61,11 +63,12 @@ export type StepStatus =
   | "success"
   | "failed"
   | "skipped"
+  | "cached"
   | "rolling-back"
   | "rolled-back"
   | "rollback-failed";
 
-export type PhaseStatus = "pending" | "running" | "success" | "failed" | "skipped";
+export type PhaseStatus = "pending" | "running" | "success" | "failed" | "skipped" | "cached";
 
 export type RunStatus = "pending" | "running" | "success" | "failed" | "aborted";
 
@@ -86,6 +89,81 @@ export type RunStatus = "pending" | "running" | "success" | "failed" | "aborted"
  * which is already both complete and in place.
  */
 export type LogPlacement = "scrollback" | "step" | "bottom";
+
+/* -------------------------------------------------------------------------- */
+/* Cache                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/** One stored result, as it sits in a {@link CacheStore}. */
+export interface CachedEntry {
+  /** What the phase contributed, or what the step returned. */
+  value: unknown;
+  /** Wall-clock ms (`Date.now()`) at the moment it was written. */
+  savedAt: number;
+}
+
+/**
+ * Where cached values live. The three methods are all a store has to do — a
+ * Redis or S3 backing is a dozen lines.
+ *
+ * `slot` identifies which phase or step an entry belongs to and is derived
+ * from its name; scripts never write it. It exists so that several phases can
+ * point at one store without overwriting each other.
+ */
+export interface CacheStore {
+  read(slot: string): Awaitable<CachedEntry | undefined>;
+  write(slot: string, entry: CachedEntry): Awaitable<void>;
+  clear(slot: string): Awaitable<void>;
+}
+
+/** What `stale` gets to decide on. */
+export interface StaleContext<In, Ctx> {
+  /** The stored value — the phase's context delta, or the step's return value. */
+  value: unknown;
+  input: In;
+  /** The live context as it stands right now, *before* the entry is applied. */
+  ctx: Ctx;
+  /** Wall-clock ms at which the entry was written. */
+  savedAt: number;
+  /** How old the entry is, in ms. A TTL is `({ ageMs }) => ageMs > 3_600_000`. */
+  ageMs: number;
+}
+
+/**
+ * Caching for a phase or a step. Pass a bare {@link CacheStore} when the
+ * defaults are enough, or this object to say when an entry stops being good.
+ *
+ * There is no key: the store *is* the identity. Whether an entry is still
+ * usable is `stale`'s job, and nothing else's.
+ */
+export interface CacheOptions<In = unknown, Ctx = unknown> {
+  store: CacheStore;
+  /**
+   * Return true to treat the stored entry as a miss — the work runs again and
+   * the entry is overwritten. Given `value` as `unknown`; annotate the
+   * parameter yourself, or hand over a `schema` and let it do the narrowing.
+   */
+  stale?: (context: StaleContext<In, Ctx>) => Awaitable<boolean>;
+  /**
+   * Checked against the stored value on every read. A stored value that no
+   * longer fits is a **miss**, not an error — which is what keeps a cache
+   * written by an older version of the script from feeding the wrong shape
+   * into the context.
+   */
+  schema?: StandardSchemaV1;
+}
+
+export type CacheSource<In = unknown, Ctx = unknown> = CacheStore | CacheOptions<In, Ctx>;
+
+/**
+ * What `run` is allowed to do with the caches this script declares.
+ *
+ * - `"on"` (default): read and write.
+ * - `"off"`: ignore them entirely — nothing is read, nothing is written.
+ * - `"refresh"`: run everything, then overwrite every entry.
+ * - `"read-only"`: use hits, but never write.
+ */
+export type CacheMode = "on" | "off" | "refresh" | "read-only";
 
 /* -------------------------------------------------------------------------- */
 /* Handler-facing UI surface                                                   */
@@ -227,6 +305,18 @@ export interface StepDef<
   ) => Awaitable<void>;
   /** Skip the step (and its rollback) when this resolves falsy. */
   when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
+  /**
+   * Reuse this step's return value from a previous run instead of running the
+   * handler. On a hit the stored value is merged into the context exactly as
+   * if the handler had produced it — and, since the step never ran, its
+   * `rollback` cannot fire during a later unwind. That is deliberate: the side
+   * effect belongs to the earlier run and was never undone.
+   *
+   * ```ts
+   * cache: { store: fileStore("./cache.json"), stale: ({ ageMs }) => ageMs > 60_000 }
+   * ```
+   */
+  cache?: CacheSource<In, Ctx>;
   retry?: RetryPolicy;
   timeoutMs?: number;
 }
@@ -235,6 +325,25 @@ export interface PhaseOptions<In = unknown, Ctx = unknown> {
   description?: string;
   /** Skip every step in the phase when this resolves falsy. */
   when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
+  /**
+   * Reuse this phase's work from a previous run. What gets stored is the
+   * phase's **delta** — the keys its steps contributed to the context, minus
+   * anything they cleaned — so a hit skips every step and merges that delta
+   * over the live context, leaving keys from earlier phases alone.
+   *
+   * `stale` and `when` see the context as it stands when the phase is reached,
+   * which is exactly `Ctx` here, so both are typed without any annotation.
+   *
+   * ```ts
+   * .addPhase("Build", {
+   *   cache: {
+   *     store: fileStore("./cache.json"),
+   *     stale: ({ ctx }) => ctx.sha !== lastBuiltSha,
+   *   },
+   * })
+   * ```
+   */
+  cache?: CacheSource<In, Ctx>;
 }
 
 export interface ScriptOptions {

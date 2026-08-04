@@ -303,6 +303,85 @@ per placement.
 `when` returning false marks the step **skipped** — its rollback never runs.
 Phases accept `when` too, which skips all their steps.
 
+## Caching
+
+A phase or a step can reuse what it produced on an earlier run. Point it at a
+store and it stops repeating work:
+
+```ts
+import { Script, fileStore } from "@michaelrwalker/stagehand";
+
+const cache = fileStore("./.stagehand-cache.json");
+
+new Script<Input>({ name: "deploy" })
+  .addPhase("Build", { cache })
+  .addStep({ name: "install", handler: … })
+  .addStep({ name: "compile", handler: … })
+
+  .addPhase("Release")
+  .addStep({ name: "warm CDN", cache, handler: … })
+```
+
+On a hit the work is skipped and the stored value is merged into the context —
+downstream steps see the same keys, at the same types, either way.
+
+**What gets stored.** A phase stores its **delta**: the keys its steps
+contributed, minus anything they `clean`ed. Keys from earlier phases are never
+part of it, so a hit can't overwrite a value this run just computed. A step
+stores exactly what its handler returned.
+
+**There is no key.** The store is the identity. Say when an entry stops being
+good with `stale`, or delete the file:
+
+```ts
+.addPhase("Build", {
+  cache: {
+    store: cache,
+    stale: ({ value, ctx, ageMs }) => ageMs > 3_600_000 || value.sha !== ctx.sha,
+    schema: BuildSchema,   // optional; a value that no longer fits is a miss
+  },
+})
+```
+
+`stale` and `schema` both see the context as it stands when the phase is
+reached, so `ctx` is typed with no annotation. `value` arrives as `unknown` —
+annotate the parameter, or hand over a `schema` and let it narrow. A stored
+value that fails its schema is treated as a **miss**, not an error, which is
+what stops a cache written by an older version of the script from feeding the
+wrong shape into the context.
+
+**Rollback.** Cached work never ran, so its `rollback` can't fire during a
+later unwind — the side effect belongs to the run that wrote the entry and was
+never undone. For the same reason a failure downstream leaves entries alone.
+
+**Per run**, without touching the script:
+
+```ts
+await deploy.run(input, { cache: argv.includes("--no-cache") ? "off" : "on" });
+```
+
+`"on"` (default) reads and writes · `"off"` ignores caching entirely ·
+`"refresh"` runs everything and overwrites · `"read-only"` uses hits but never
+writes.
+
+**Stores** are three methods, so Redis or S3 is a dozen lines:
+
+```ts
+interface CacheStore {
+  read(slot: string): Awaitable<CachedEntry | undefined>;
+  write(slot: string, entry: CachedEntry): Awaitable<void>;
+  clear(slot: string): Awaitable<void>;
+}
+```
+
+`slot` is derived from the phase or step name so several phases can share one
+store; scripts never write it. `fileStore(path)` keeps every slot in one JSON
+file — a missing, unreadable or corrupt file all read as no cache at all, so
+deleting it is always a valid reset. `memoryStore()` lasts for the process.
+
+A store that throws — unreadable file, full disk, a `stale` predicate with a bug
+— logs a warning and does the work. Caching never decides whether a run passes.
+
 ## Script options
 
 ```ts
@@ -352,7 +431,7 @@ error, not a runtime `undefined`.
 
 ## Examples
 
-Seven runnable scripts, each aimed at a different part of the API. Most take a
+Eight runnable scripts, each aimed at a different part of the API. Most take a
 flag to switch between the happy path and the interesting one.
 
 | | |
@@ -363,6 +442,7 @@ flag to switch between the happy path and the interesting one.
 | [`intake.ts`](examples/intake.ts) | `defineInput` with a hand-rolled Standard Schema, plus the full handler UI surface. `-- --bad` to watch validation reject the run, `-- --dirty` for a failing checklist item |
 | [`modular.ts`](examples/modular.ts) | `stepFor` steps living in [`steps/tenancy.ts`](examples/steps/tenancy.ts), shared by two unrelated scripts — the imported rollback compensates in both. `-- --fail` |
 | [`log-placement.ts`](examples/log-placement.ts) | The same script run three times, once per `logPlacement` value, so the difference is visible directly |
+| [`cache.ts`](examples/cache.ts) | A cached `Build` phase and a cached step. Run it twice to watch the second run skip both. `-- --fresh` to rebuild and overwrite |
 | [`validate.ts`](examples/validate.ts) | The smallest thing that runs: two steps, `rollback: "none"` |
 
 ```

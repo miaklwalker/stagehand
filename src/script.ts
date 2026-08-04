@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { normalizeCache, phaseSlot, readCache, stepSlot, writeCache } from "./cache.js";
 import { createRollbackContext, createStepContext } from "./context.js";
 import {
   ScriptAbortedError,
@@ -7,8 +8,10 @@ import {
   StepTimeoutError,
   isAbort,
 } from "./errors.js";
-import type { PhaseState, RunState, StepState } from "./state.js";
+import { errorMessage, type PhaseState, type RunState, type StepState } from "./state.js";
 import type {
+  CacheMode,
+  CacheSource,
   CleanField,
   Cleaned,
   Merge,
@@ -35,6 +38,7 @@ interface AnyStepDef {
   rollback?: (context: unknown) => unknown;
   clean?: readonly string[];
   when?: (context: { input: unknown; ctx: unknown }) => unknown;
+  cache?: CacheSource;
   retry?: RetryPolicy;
   timeoutMs?: number;
 }
@@ -54,6 +58,12 @@ interface RuntimeStep {
 export interface RunOptions {
   /** Cancel the run from the outside. */
   signal?: AbortSignal;
+  /**
+   * What this run may do with the caches the script declares. Default `"on"`.
+   * Wire it to a flag — `cache: argv.includes("--no-cache") ? "off" : "on"` —
+   * to control caching without touching the script.
+   */
+  cache?: CacheMode;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -279,6 +289,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
     try {
       let cursor = 0;
+      const cacheMode: CacheMode = runOptions.cache ?? "on";
 
       phaseLoop: for (const [phaseIndex, phase] of this.definition.entries()) {
         const phaseState = phases[phaseIndex];
@@ -298,6 +309,39 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
           continue;
         }
 
+        const phaseCache = normalizeCache(phase.options.cache);
+        const slot = phaseSlot(phase.name);
+
+        if (phaseCache) {
+          const hit = await safely(
+            () => readCache(phaseCache, slot, input, ctx, cacheMode),
+            { hit: false } as const,
+            `read for phase "${phase.name}"`,
+            renderer,
+          );
+          if (hit.hit) {
+            // The delta was recorded *after* this phase's own cleans, so
+            // applying it and then replaying those cleans reproduces exactly
+            // the context the phase left behind the first time — including the
+            // upstream keys its steps removed.
+            merge(ctx, hit.value);
+            phaseState.cacheAgeMs = hit.ageMs;
+            for (const item of phaseSteps) {
+              // Age lives on the phase line here; repeating it per step would
+              // just be the same number N times.
+              item.state.status = "cached";
+              drop(ctx, item.def.clean);
+              renderer.onStepEnd(item.state);
+            }
+            renderer.refresh();
+            continue;
+          }
+        }
+
+        // What this phase contributes to the context, tracked only when there
+        // is somewhere to store it.
+        const delta: Record<string, unknown> | null = phaseCache ? {} : null;
+
         for (const item of phaseSteps) {
           if (runController.signal.aborted) {
             failure = {
@@ -311,9 +355,36 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
           if (item.def.when && !(await item.def.when({ input, ctx }))) {
             item.state.status = "skipped";
             drop(ctx, item.def.clean);
+            drop(delta, item.def.clean);
             renderer.onStepEnd(item.state);
             renderer.refresh();
             continue;
+          }
+
+          const stepCache = normalizeCache(item.def.cache);
+          const stepKey = stepSlot(phase.name, item.state.name);
+
+          if (stepCache) {
+            const hit = await safely(
+              () => readCache(stepCache, stepKey, input, ctx, cacheMode),
+              { hit: false } as const,
+              `read for step "${item.state.name}"`,
+              renderer,
+            );
+            if (hit.hit) {
+              // Never entered `completed`, so this step's rollback cannot fire
+              // during a later unwind — the side effect belongs to the run that
+              // wrote the entry, and was never undone.
+              item.state.status = "cached";
+              item.state.cacheAgeMs = hit.ageMs;
+              merge(ctx, hit.value);
+              merge(delta, hit.value);
+              drop(ctx, item.def.clean);
+              drop(delta, item.def.clean);
+              renderer.onStepEnd(item.state);
+              renderer.refresh();
+              continue;
+            }
           }
 
           item.state.status = "running";
@@ -321,18 +392,19 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
           renderer.onStepStart(item.state);
           renderer.refresh();
 
+          let output: unknown;
           try {
-            const output = await this.executeStep(item, input, ctx, runController.signal, renderer);
+            output = await this.executeStep(item, input, ctx, runController.signal, renderer);
             item.state.status = "success";
             item.state.endedAt = performance.now();
             delete item.state.statusText;
-            if (output !== null && typeof output === "object") {
-              Object.assign(ctx, output);
-            }
+            merge(ctx, output);
+            merge(delta, output);
             // The step said it is done with these; later steps neither see
             // them at runtime nor have them in their context type. `output`
             // keeps its own copy, so this step's rollback is unaffected.
             drop(ctx, item.def.clean);
+            drop(delta, item.def.clean);
             completed.push({ runtime: item, output });
             renderer.onStepEnd(item.state);
             renderer.refresh();
@@ -346,6 +418,28 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
             renderer.refresh();
             break phaseLoop;
           }
+
+          // Only reached when the step succeeded — a `break phaseLoop` skips
+          // it. Kept outside the try so a store that cannot write never gets
+          // mistaken for a handler that threw.
+          if (stepCache) {
+            await safely(
+              () => writeCache(stepCache, stepKey, output, cacheMode),
+              undefined,
+              `write for step "${item.state.name}"`,
+              renderer,
+            );
+          }
+        }
+
+        // Every step settled without failing, so the delta is complete.
+        if (phaseCache && delta) {
+          await safely(
+            () => writeCache(phaseCache, slot, delta, cacheMode),
+            undefined,
+            `write for phase "${phase.name}"`,
+            renderer,
+          );
         }
       }
 
@@ -573,9 +667,36 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 /* -------------------------------------------------------------------------- */
 
 /** Delete a step's `clean` keys from the live context, in place. */
-function drop(ctx: object, keys: readonly string[] | undefined): void {
-  if (!keys) return;
+function drop(ctx: object | null, keys: readonly string[] | undefined): void {
+  if (!ctx || !keys) return;
   for (const key of keys) delete (ctx as Record<string, unknown>)[key];
+}
+
+/** Fold a handler's return value — or a cache hit — into a target object. */
+function merge(target: object | null, value: unknown): void {
+  if (!target || value === null || typeof value !== "object") return;
+  Object.assign(target, value);
+}
+
+/**
+ * Run a cache operation without letting it decide the fate of the run.
+ *
+ * A store that cannot be read, a `stale` predicate that throws, a disk that is
+ * full — none of those mean the work failed. Each is reported as a warning and
+ * falls back to doing the work, which is always the safe direction.
+ */
+async function safely<T>(
+  action: () => Promise<T>,
+  fallback: T,
+  what: string,
+  renderer: Renderer,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    renderer.log({ level: "warn", message: `cache ${what} failed: ${errorMessage(error)}` });
+    return fallback;
+  }
 }
 
 /** The `rollbackKeys` slice of the context — `{}` when none were declared. */

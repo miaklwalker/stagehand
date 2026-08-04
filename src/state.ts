@@ -36,12 +36,16 @@ export interface StepState {
   /** Entries routed here by `logPlacement: "step"` — most recent last, capped. */
   logs: LogEntry[];
   hasRollback: boolean;
+  /** Age of the cache entry that stood in for this step, at the moment it hit. */
+  cacheAgeMs?: number;
 }
 
 export interface PhaseState {
   name: string;
   description?: string;
   steps: StepState[];
+  /** Set when the whole phase was served from cache. */
+  cacheAgeMs?: number;
 }
 
 export interface RunState {
@@ -69,8 +73,13 @@ export function phaseStatus(phase: PhaseState): PhaseStatus {
   ) {
     return "running";
   }
+  if (steps.every((s) => s.status === "cached")) return "cached";
   if (steps.every((s) => s.status === "skipped")) return "skipped";
-  if (steps.every((s) => s.status === "success" || s.status === "skipped")) return "success";
+  // A phase that only partly hit its step caches still ran, so it reads as a
+  // normal success; "cached" is reserved for one that did no work at all.
+  if (steps.every((s) => s.status === "success" || s.status === "skipped" || s.status === "cached")) {
+    return "success";
+  }
   if (steps.every((s) => s.status === "pending")) return "pending";
   return "running";
 }
@@ -100,6 +109,15 @@ export function formatDuration(ms: number): string {
   const minutes = Math.floor(ms / 60_000);
   const seconds = Math.round((ms % 60_000) / 1000);
   return `${minutes}m ${seconds}s`;
+}
+
+/** Coarse relative time for cache badges — `4m ago`, not `4m 12s ago`. */
+export function formatAge(ms: number): string {
+  if (ms < 1000) return "just now";
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s ago`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m ago`;
+  if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h ago`;
+  return `${Math.round(ms / 86_400_000)}d ago`;
 }
 
 export function errorMessage(error: unknown): string {
