@@ -3,6 +3,7 @@ export {
   script,
   stepFor,
   routineFor,
+  type MountInput,
   type MountOptions,
   type Routine,
   type RunOptions,
@@ -11,6 +12,7 @@ export {
 export { fileStore, memoryStore } from "./cache.js";
 
 export {
+  CacheShapeError,
   DuplicateNameError,
   RollbackFailedError,
   SchemaValidationError,
@@ -23,6 +25,7 @@ export {
 
 export type {
   Awaitable,
+  CacheHandle,
   CacheMode,
   CacheOptions,
   CacheSource,
@@ -43,6 +46,7 @@ export type {
   RunResult,
   RunStatus,
   ScriptOptions,
+  SlotValue,
   StaleContext,
   StepContext,
   StepDef,

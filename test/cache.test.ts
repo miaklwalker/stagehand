@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -443,5 +443,59 @@ test("the live frame badges a cached phase with its age", async () => {
     assert.match(text, /compile\s+cached/);
   } finally {
     setColorEnabled(true);
+  }
+});
+
+test("concurrent writes to one fileStore neither race nor lose slots", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "stagehand-race-"));
+  const path = join(dir, "bucketCache.json");
+
+  try {
+    const store = fileStore(path);
+
+    // Every write is a read-modify-write of the whole file. Overlapping them
+    // used to rename a shared temp file out from under itself — surfacing as
+    // ENOENT or EPERM depending on timing — and to lose slots outright.
+    await Promise.all(
+      Array.from({ length: 24 }, (_, i) =>
+        store.write(`slot_${i}`, { value: { i }, savedAt: Date.now() }),
+      ),
+    );
+
+    for (let i = 0; i < 24; i += 1) {
+      assert.deepEqual((await store.read(`slot_${i}`))?.value, { i }, `slot_${i} survived`);
+    }
+
+    await Promise.all(Array.from({ length: 12 }, (_, i) => store.clear(`slot_${i}`)));
+    for (let i = 0; i < 12; i += 1) assert.equal(await store.read(`slot_${i}`), undefined);
+    for (let i = 12; i < 24; i += 1) assert.deepEqual((await store.read(`slot_${i}`))?.value, { i });
+
+    // No temp files left behind.
+    const leftovers = (await readdir(dir)).filter((name) => name.endsWith(".tmp"));
+    assert.deepEqual(leftovers, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("two fileStore handles on one path share a write queue", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "stagehand-share-"));
+  const path = join(dir, "cache.json");
+
+  try {
+    const a = fileStore(path);
+    // A different spelling of the same file — the queue is keyed by the
+    // resolved path, not by the string handed in.
+    const b = fileStore(join(dir, "sub", "..", "cache.json"));
+
+    await Promise.all([
+      a.write("from-a", { value: 1, savedAt: Date.now() }),
+      b.write("from-b", { value: 2, savedAt: Date.now() }),
+    ]);
+
+    assert.equal((await a.read("from-a"))?.value, 1);
+    assert.equal((await a.read("from-b"))?.value, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

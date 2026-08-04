@@ -58,6 +58,32 @@ export class DuplicateNameError extends Error {
   }
 }
 
+/**
+ * A cached value was read for a field it does not have.
+ *
+ * Without a `schema` a slot's type is inferred from the steps that produce it,
+ * which describes *today's* code — while the entry on disk was written by
+ * whatever the code looked like when it last ran. This is thrown at the exact
+ * property access where those two disagree, rather than letting an `undefined`
+ * travel somewhere less obvious.
+ */
+export class CacheShapeError extends Error {
+  readonly slot: string;
+  readonly path: string;
+
+  constructor(slot: string, path: string) {
+    super(
+      `Read "${path}" from cache slot "${slot}", but the stored value has no such property. ` +
+        `The entry was probably written before this script's shape changed — ` +
+        `drop it with cache.clear("${slot}"), or declare a schema on the slot to have ` +
+        `mismatches rejected on read.`,
+    );
+    this.name = "CacheShapeError";
+    this.slot = slot;
+    this.path = path;
+  }
+}
+
 /** A step's handler threw. `cause` holds whatever it actually threw. */
 export class StepFailedError extends Error {
   readonly phase: string;

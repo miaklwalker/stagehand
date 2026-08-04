@@ -5,3 +5,4 @@ dist/
 .idea
 
 .stagehand-cache.json
+.stagehand-invalidate.json

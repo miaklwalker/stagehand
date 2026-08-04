@@ -1,6 +1,14 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { normalizeCache, phaseSlot, readCache, stepSlot, writeCache } from "./cache.js";
-import { createRollbackContext, createStepContext } from "./context.js";
+import {
+  createCacheHandle,
+  normalizeCache,
+  phaseSlot,
+  readCache,
+  type SlotBinding,
+  stepSlot,
+  writeCache,
+} from "./cache.js";
+import { type ContextDeps, createRollbackContext, createStepContext } from "./context.js";
 import {
   DuplicateNameError,
   ScriptAbortedError,
@@ -23,6 +31,7 @@ import type {
   RollbackReport,
   RunResult,
   ScriptOptions,
+  SlotValue,
   StepDef,
   StepReport,
 } from "./types.js";
@@ -84,6 +93,7 @@ export interface Routine<
   Ctx extends object,
   Out extends object,
   Reserved extends PropertyKey,
+  Slots = {},
 > {
   /**
    * Phantom. `In` and `Ctx` sit in contravariant position here, which is what
@@ -92,9 +102,19 @@ export interface Routine<
    */
   readonly [REQUIRES]: (context: { input: In; ctx: Ctx }) => void;
   /** Phantom. Carries what the routine contributes so `use` can infer it. */
-  readonly [PRODUCES]: Out;
+  readonly [PRODUCES]: [Out, Slots];
   readonly name: string;
 }
+
+/**
+ * A mounted fragment's slots, as the host addresses them. `as` renames the
+ * phases, so it has to rename their slots too — otherwise every
+ * `cache.clear("Fetch")` written against an unprefixed mount would keep
+ * compiling while silently addressing nothing.
+ */
+export type Mounted<As extends string | undefined, Slots> = [As] extends [string]
+  ? { [K in keyof Slots as `${As} / ${K & string}`]: Slots[K] }
+  : Slots;
 
 /** Recorded definition behind a {@link Routine}, kept off the public type. */
 interface RoutineBody {
@@ -131,6 +151,33 @@ export type MountInput<In, Ctx, SubIn> =
 interface MountBinding {
   source: unknown;
 }
+
+/**
+ * The phase currently being built, carried so its slot can be committed once
+ * the phase closes — which is the first moment its delta is fully known.
+ *
+ * `name` is `never` for a phase that declared no cache, so committing it adds
+ * nothing: `Record<never, V>` is `{}`. That is also the starting state, which
+ * is why no separate "is anything open" flag is needed.
+ */
+export interface OpenPhase {
+  name: string | never;
+  /** The `schema`'s output type, or `unknown` when none was declared. */
+  schema: unknown;
+  /** What this phase's steps have contributed so far. */
+  delta: object;
+}
+
+export type ClosedPhase = { name: never; schema: unknown; delta: {} };
+
+/** Fold the open phase's slot into the map. A no-op for uncached phases. */
+export type Commit<Slots, Open extends OpenPhase> = Slots &
+  Record<Open["name"], SlotValue<Open["schema"], Open["delta"]>>;
+
+/** Phase options with `cache` required, so the cached overload is unambiguous. */
+export type CachedPhaseOptions<In, Ctx, Value> = Omit<PhaseOptions<In, Ctx>, "cache"> & {
+  cache: CacheSource<In, Ctx, Value>;
+};
 
 export interface RunOptions {
   /** Cancel the run from the outside. */
@@ -174,7 +221,13 @@ export interface RunOptions {
  * The third parameter is inferred too: it collects the keys steps reserved
  * through `rollbackKeys`, which is how `clean` knows what it may not remove.
  */
-export class Script<In = void, Ctx extends object = {}, Reserved extends PropertyKey = never> {
+export class Script<
+  In = void,
+  Ctx extends object = {},
+  Reserved extends PropertyKey = never,
+  Slots = {},
+  Open extends OpenPhase = ClosedPhase,
+> {
   /**
    * Phantom, erased at compile time. `run` is a *method*, so its parameter
    * compares bivariantly and `In` would otherwise carry no safety across two
@@ -234,18 +287,44 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
     return result.value as In;
   }
 
+  /**
+   * Open a cached phase. Its name becomes a slot addressable through
+   * `context.cache` in every step declared after it — typed as the phase's own
+   * delta, or as the `schema`'s output when one is given.
+   */
+  addPhase<const Name extends string, Value = unknown>(
+    name: Name,
+    options: CachedPhaseOptions<In, Ctx, Value>,
+  ): Script<In, Ctx, Reserved, Commit<Slots, Open>, { name: Name; schema: Value; delta: {} }>;
   /** Open a new phase. Subsequent `addStep` calls land in it. */
-  addPhase(name: string, options?: PhaseOptions<In, Ctx>): Script<In, Ctx, Reserved>;
-  /** Open a phase and populate it inside a callback, keeping the type flow. */
-  addPhase<Next extends object, NextReserved extends PropertyKey>(
+  addPhase(
     name: string,
-    build: (script: Script<In, Ctx, Reserved>) => Script<In, Next, NextReserved>,
-  ): Script<In, Next, NextReserved>;
-  addPhase<Next extends object, NextReserved extends PropertyKey>(
+    options?: PhaseOptions<In, Ctx>,
+  ): Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase>;
+  /** Open a phase and populate it inside a callback, keeping the type flow. */
+  addPhase<
+    Next extends object,
+    NextReserved extends PropertyKey,
+    NextSlots,
+    NextOpen extends OpenPhase,
+  >(
+    name: string,
+    build: (
+      script: Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase>,
+    ) => Script<In, Next, NextReserved, NextSlots, NextOpen>,
+  ): Script<In, Next, NextReserved, NextSlots, NextOpen>;
+  addPhase<
+    Next extends object,
+    NextReserved extends PropertyKey,
+    NextSlots,
+    NextOpen extends OpenPhase,
+  >(
     name: string,
     options: PhaseOptions<In, Ctx>,
-    build: (script: Script<In, Ctx, Reserved>) => Script<In, Next, NextReserved>,
-  ): Script<In, Next, NextReserved>;
+    build: (
+      script: Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase>,
+    ) => Script<In, Next, NextReserved, NextSlots, NextOpen>,
+  ): Script<In, Next, NextReserved, NextSlots, NextOpen>;
   addPhase(
     name: string,
     optionsOrBuild?: PhaseOptions<In, Ctx> | ((script: never) => unknown),
@@ -281,8 +360,20 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
     const RollbackKeys extends readonly PropertyKey[] = readonly [],
     const CleanKeys extends readonly PropertyKey[] = readonly [],
   >(
-    def: StepDef<In, Ctx, Out, RollbackKeys> & CleanField<Ctx, Reserved, CleanKeys>,
-  ): Script<In, Cleaned<Merge<Ctx, Out>, CleanKeys[number]>, Reserved | RollbackKeys[number]> {
+    def: StepDef<In, Ctx, Out, RollbackKeys, Slots> & CleanField<Ctx, Reserved, CleanKeys>,
+  ): Script<
+    In,
+    Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
+    Reserved | RollbackKeys[number],
+    Slots,
+    // The delta takes the same transform as the context, which is what makes
+    // a phase's slot type match what it actually stores.
+    {
+      name: Open["name"];
+      schema: Open["schema"];
+      delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
+    }
+  > {
     const step = def as unknown as AnyStepDef;
     const rollbackKeys = step.rollbackKeys ?? [];
 
@@ -314,7 +405,13 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
     return this as unknown as Script<
       In,
       Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
-      Reserved | RollbackKeys[number]
+      Reserved | RollbackKeys[number],
+      Slots,
+      {
+        name: Open["name"];
+        schema: Open["schema"];
+        delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
+      }
     >;
   }
 
@@ -344,26 +441,62 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
    * @throws {DuplicateNameError} if a phase it brings is already defined here.
    * Mount the same routine twice by naming each mount with `as`.
    */
-  use<SubIn, Out extends object, R extends PropertyKey>(
-    routine: Routine<SubIn, Ctx, Out, R>,
-    options: MountOptions & { input: MountInput<In, Ctx, SubIn> },
-  ): Script<In, Merge<Ctx, Out>, Reserved | R>;
-  use<SubIn, Out extends object, R extends PropertyKey>(
-    script: Script<SubIn, Out, R>,
-    options: MountOptions & { input: MountInput<In, Ctx, SubIn> },
-  ): Script<In, Merge<Ctx, Out>, Reserved | R>;
+  use<
+    SubIn,
+    Out extends object,
+    R extends PropertyKey,
+    RS,
+    const As extends string | undefined = undefined,
+  >(
+    routine: Routine<SubIn, Ctx, Out, R, RS>,
+    options: { as?: As; input: MountInput<In, Ctx, SubIn> },
+  ): Script<In, Merge<Ctx, Out>, Reserved | R, Commit<Slots, Open> & Mounted<As, RS>, ClosedPhase>;
+  use<
+    SubIn,
+    Out extends object,
+    R extends PropertyKey,
+    SS,
+    SO extends OpenPhase,
+    const As extends string | undefined = undefined,
+  >(
+    script: Script<SubIn, Out, R, SS, SO>,
+    options: { as?: As; input: MountInput<In, Ctx, SubIn> },
+  ): Script<
+    In,
+    Merge<Ctx, Out>,
+    Reserved | R,
+    Commit<Slots, Open> & Mounted<As, Commit<SS, SO>>,
+    ClosedPhase
+  >;
   // Script before Routine: on a failed call TypeScript reports the *last*
   // overload's error, and "not assignable to Routine<...>" names the missing
   // input or context key, where the Script variant would just list class
   // members the caller never meant to supply.
-  use<Out extends object, R extends PropertyKey>(
-    script: Script<In, Out, R>,
-    options?: MountOptions,
-  ): Script<In, Merge<Ctx, Out>, Reserved | R>;
-  use<Out extends object, R extends PropertyKey>(
-    routine: Routine<In, Ctx, Out, R>,
-    options?: MountOptions,
-  ): Script<In, Merge<Ctx, Out>, Reserved | R>;
+  use<
+    Out extends object,
+    R extends PropertyKey,
+    SS,
+    SO extends OpenPhase,
+    const As extends string | undefined = undefined,
+  >(
+    script: Script<In, Out, R, SS, SO>,
+    options?: { as?: As },
+  ): Script<
+    In,
+    Merge<Ctx, Out>,
+    Reserved | R,
+    Commit<Slots, Open> & Mounted<As, Commit<SS, SO>>,
+    ClosedPhase
+  >;
+  use<
+    Out extends object,
+    R extends PropertyKey,
+    RS,
+    const As extends string | undefined = undefined,
+  >(
+    routine: Routine<In, Ctx, Out, R, RS>,
+    options?: { as?: As },
+  ): Script<In, Merge<Ctx, Out>, Reserved | R, Commit<Slots, Open> & Mounted<As, RS>, ClosedPhase>;
   use(source: object, options: MountOptions & { input?: unknown } = {}): unknown {
     const body = bodies.get(source);
     if (!body) {
@@ -488,6 +621,29 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
       logTail: [],
     };
     if (this.options.description !== undefined) state.description = this.options.description;
+
+    // Every slot this script declares, for `context.cache`. Ordering is
+    // enforced by the types; at runtime the whole table is available.
+    const slots = new Map<string, SlotBinding>();
+    for (const phase of this.definition) {
+      const phaseCache = normalizeCache(phase.options.cache);
+      if (phaseCache) {
+        slots.set(phaseSlot(phase.name), {
+          store: phaseCache.store,
+          schema: Boolean(phaseCache.schema),
+        });
+      }
+      for (const step of phase.steps) {
+        const stepCache = normalizeCache(step.cache);
+        if (stepCache) {
+          slots.set(stepSlot(phase.name, step.name), {
+            store: stepCache.store,
+            schema: Boolean(stepCache.schema),
+          });
+        }
+      }
+    }
+    const cache = createCacheHandle(slots);
 
     const renderer = createRenderer({
       ...(this.options.plain !== undefined ? { plain: this.options.plain } : {}),
@@ -633,7 +789,14 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
           let output: unknown;
           try {
-            output = await this.executeStep(item, phaseInput, ctx, runController.signal, renderer);
+            output = await this.executeStep(
+              item,
+              phaseInput,
+              ctx,
+              runController.signal,
+              renderer,
+              cache,
+            );
             item.state.status = "success";
             item.state.endedAt = performance.now();
             delete item.state.statusText;
@@ -689,6 +852,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
           completed,
           failure,
           ctx,
+          cache,
           state,
           rollbacks,
           rollbackController.signal,
@@ -750,6 +914,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
     ctx: Ctx,
     runSignal: AbortSignal,
     renderer: Renderer,
+    cache: ContextDeps["cache"],
   ): Promise<unknown> {
     const retry = item.def.retry;
     const maxAttempts = Math.max(1, retry?.attempts ?? 1);
@@ -775,7 +940,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
       try {
         const context = createStepContext(
-          { renderer, step: item.state, phaseName: item.phaseName },
+          { renderer, step: item.state, phaseName: item.phaseName, cache },
           input,
           ctx,
           controller.signal,
@@ -811,6 +976,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
     completed: Array<{ runtime: RuntimeStep; output: unknown; input: In }>,
     failure: { phase: string; step: string; error: unknown },
     ctx: Ctx,
+    cache: ContextDeps["cache"],
     state: RunState,
     rollbacks: RollbackReport[],
     signal: AbortSignal,
@@ -833,7 +999,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
       try {
         const context = createRollbackContext(
-          { renderer, step: entry.runtime.state, phaseName: entry.runtime.phaseName },
+          { renderer, step: entry.runtime.state, phaseName: entry.runtime.phaseName, cache },
           // The input this step actually ran with — a mounted fragment's
           // rollback sees its mount's input, not the host's.
           entry.input,
@@ -1001,10 +1167,10 @@ function abortRejection(signal: AbortSignal): { promise: Promise<never>; dispose
  * `rollbackKeys` works the same here, and the keys it names stay reserved once
  * the step is handed to `addStep`.
  */
-export function stepFor<In, Ctx extends object = {}>() {
+export function stepFor<In, Ctx extends object = {}, Slots = {}>() {
   return <Out extends object | void, const RollbackKeys extends readonly PropertyKey[] = readonly []>(
-    def: StepDef<In, Ctx, Out, RollbackKeys>,
-  ): StepDef<In, Ctx, Out, RollbackKeys> => def;
+    def: StepDef<In, Ctx, Out, RollbackKeys, Slots>,
+  ): StepDef<In, Ctx, Out, RollbackKeys, Slots> => def;
 }
 
 /**
@@ -1032,15 +1198,15 @@ export function stepFor<In, Ctx extends object = {}>() {
  * travel with it.
  */
 export function routineFor<In, Ctx extends object = {}>() {
-  return <Out extends object, R extends PropertyKey>(
+  return <Out extends object, R extends PropertyKey, S, O extends OpenPhase>(
     name: string,
-    build: (script: Script<In, Ctx, never>) => Script<In, Out, R>,
-  ): Routine<In, Ctx, Out, R> => {
+    build: (script: Script<In, Ctx, never>) => Script<In, Out, R, S, O>,
+  ): Routine<In, Ctx, Out, R, Commit<S, O>> => {
     const built = build(new Script<In, Ctx, never>(name));
     const body = bodies.get(built);
     if (!body) throw new StepDefinitionError(name, `routineFor("${name}") must return the script it was given`);
 
-    const routine = { name } as Routine<In, Ctx, Out, R>;
+    const routine = { name } as unknown as Routine<In, Ctx, Out, R, Commit<S, O>>;
     bodies.set(routine, { ...body, name });
     return routine;
   };

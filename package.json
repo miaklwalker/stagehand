@@ -17,17 +17,9 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc && npm run build && tsc -p examples && tsc -p test",
-    "example": "npm run build && node --experimental-strip-types examples/deploy.ts",
-    "example:fail": "npm run build && node --experimental-strip-types examples/deploy.ts --fail",
-    "example:checkout": "npm run build && node --experimental-strip-types examples/checkout.ts",
-    "example:cache": "npm run build && node --experimental-strip-types examples/cache.ts",
-    "example:routine": "npm run build && node --experimental-strip-types examples/routine.ts",
-    "example:resilience": "npm run build && node --experimental-strip-types examples/resilience.ts",
-    "example:intake": "npm run build && node --experimental-strip-types examples/intake.ts",
-    "example:modular": "npm run build && node --experimental-strip-types examples/modular.ts",
-    "example:log-placement": "npm run build && node --experimental-strip-types examples/log-placement.ts",
+    "typecheck": "tsc && npm run build && tsc -p examples && tsc -p test && tsc -p scripts",
     "test": "npm run build && node --experimental-strip-types --test test/*.test.ts",
+    "prerelease": "node --experimental-strip-types scripts/preflight.ts",
     "release": "release-it"
   },
   "keywords": [
@@ -64,6 +56,9 @@
     },
     "npm": {
       "publish": true
+    },
+    "hooks": {
+      "after:bump": "node --experimental-strip-types scripts/preflight.ts --allow-dirty"
     }
   },
   "author": "Michael Walker",

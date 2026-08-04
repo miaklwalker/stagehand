@@ -1,3 +1,4 @@
+import type { CacheHandle } from "./types.js";
 import type { LogLevel, ProgressState, StepState, TaskState } from "./state.js";
 import type { Renderer } from "./ui/renderer.js";
 import type {
@@ -103,6 +104,8 @@ export interface ContextDeps {
   renderer: Renderer;
   step: StepState;
   phaseName: string;
+  /** Backs `context.cache`; slots declared before the current step. */
+  cache: CacheHandle<Record<string, unknown>>;
 }
 
 /** Set (or, given "", clear) the step's persistent title annotation. */
@@ -119,7 +122,7 @@ export function createStepContext<In, Ctx>(
   signal: AbortSignal,
   attempt: number,
 ): StepContext<In, Ctx> {
-  const { renderer, step, phaseName } = deps;
+  const { renderer, step, phaseName, cache } = deps;
   // `step` is a routing hint: renderers that place logs on the step itself
   // (rather than the scrollback) need to know which one.
   const emit = (level: LogLevel) => (message: string) => renderer.log({ level, message }, step);
@@ -129,6 +132,7 @@ export function createStepContext<In, Ctx>(
     ctx,
     signal,
     attempt,
+    cache,
     phase: phaseName,
     step: step.name,
     log: emit("log"),
@@ -155,13 +159,14 @@ export function createRollbackContext<In, Ctx, Out>(
   error: unknown,
   signal: AbortSignal,
 ): RollbackContext<In, Ctx, Out> {
-  const { renderer, step, phaseName } = deps;
+  const { renderer, step, phaseName, cache } = deps;
   return {
     input,
     ctx,
     output,
     error,
     signal,
+    cache,
     phase: phaseName,
     step: step.name,
     log: (message) => renderer.log({ level: "warn", message }, step),

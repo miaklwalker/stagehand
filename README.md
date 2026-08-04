@@ -364,6 +364,60 @@ await deploy.run(input, { cache: argv.includes("--no-cache") ? "off" : "on" });
 `"refresh"` runs everything and overwrites · `"read-only"` uses hits but never
 writes.
 
+### Reaching the cache from a step
+
+Every handler and rollback gets a `cache` handle, typed to the cached phases
+declared **before** it:
+
+```ts
+.addPhase("Fetch", { cache: { store } })
+.addStep({ name: "pull orders", handler: … })       // → { orders }
+
+.addPhase("Adjust")
+.addStep({
+  name: "restock",
+  handler: async ({ ctx, cache }) => {
+    await cache.clear("Fetch");                     // next run refetches
+    await cache.write("Fetch", { orders: ctx.orders }, { keepAge: true });
+    const age = await cache.ageOf("Fetch");
+  },
+})
+```
+
+Slot names are checked, not stringly-typed. An uncached phase isn't a slot at
+all, and `as` renames a mounted routine's slots along with its phases — so the
+moment you write `.use(pullChannel, { as: "Amazon" })`, every
+`cache.clear("Fetch")` in the script goes red and offers `"Amazon / Fetch"`
+instead. That's the failure a hand-written string can't catch: it would keep
+compiling and silently address nothing.
+
+Invalidation flows backwards only — a later step can drop an earlier phase's
+entry, not the reverse.
+
+`write` restamps the entry as written *now* unless you pass `keepAge`. Reach
+for it when you are correcting a value rather than refreshing it: restamping
+silently buys another full TTL for data that is exactly as old as it was a
+moment ago, which is the opposite of what you want when the cache is there to
+keep you inside a rate limit.
+
+**Values are typed too.** A slot with a `schema` reads back as the schema's
+output, because that is the one thing actually *checked* against the stored
+JSON. Without a schema the phase's own delta stands in, which is convenient and
+true right up until an entry outlives the code that wrote it. For that case
+`read` returns the value behind a guard:
+
+```
+CacheShapeError: Read "orders.0.date_fixed" from cache slot "Fetch", but the
+stored value has no such property. The entry was probably written before this
+script's shape changed — drop it with cache.clear("Fetch"), or declare a schema
+on the slot to have mismatches rejected on read.
+```
+
+Only reads are trapped; assigning a new property is how you'd patch an entry.
+Missing array indices, `JSON.stringify`, `await` and iteration all behave
+normally. Pass `{ raw: true }` to opt out — do that before putting the value
+into the context, or the guard travels with it into later steps.
+
 **Stores** are three methods, so Redis or S3 is a dozen lines:
 
 ```ts
@@ -541,7 +595,7 @@ fragment someone else's script also mounts.
 
 ## Examples
 
-Nine runnable scripts, each aimed at a different part of the API. Most take a
+Ten runnable scripts, each aimed at a different part of the API. Most take a
 flag to switch between the happy path and the interesting one.
 
 | | |
@@ -553,6 +607,7 @@ flag to switch between the happy path and the interesting one.
 | [`modular.ts`](examples/modular.ts) | `stepFor` steps living in [`steps/tenancy.ts`](examples/steps/tenancy.ts), shared by two unrelated scripts — the imported rollback compensates in both. `-- --fail` |
 | [`log-placement.ts`](examples/log-placement.ts) | The same script run three times, once per `logPlacement` value, so the difference is visible directly |
 | [`cache.ts`](examples/cache.ts) | A cached `Build` phase and a cached step. Run it twice to watch the second run skip both. `-- --fresh` to rebuild and overwrite |
+| [`invalidate.ts`](examples/invalidate.ts) | `context.cache` from inside a step: correct an entry without refetching, drop one that is beyond saving, and watch the shape guard catch an entry written before the code changed. `-- --patch`, `-- --drop`, `-- --drift` |
 | [`routine.ts`](examples/routine.ts) | One reusable fragment in [`routines/channel.ts`](examples/routines/channel.ts), mounted by a sync script and, months later, a report that maps its own input onto the routine's — and gets the pull from cache. `-- --multi` mounts it twice, one storefront and API key per mount |
 | [`validate.ts`](examples/validate.ts) | The smallest thing that runs: two steps, `rollback: "none"` |
 
@@ -561,6 +616,7 @@ npm run example:checkout -- --ok
 npm run example:resilience -- --cancel
 npm run example:intake -- --bad
 npm run example:modular -- --fail
+npm run example:invalidate -- --drift
 npm run example:routine -- --multi
 npm run example:log-placement
 ```
@@ -570,11 +626,41 @@ npm run example:log-placement
 ```
 npm run build       # emit dist/
 npm test            # node:test suite
-npm run typecheck   # library + examples + tests
+npm run typecheck   # library + examples + tests + scripts
+npm run preflight   # the release gate (add -- --allow-dirty while working)
 npm run example     # the happy path, live
 npm run example:fail
 npm run release     # release-it: version, tag, publish
 ```
+
+## Releasing
+
+[`scripts/preflight.ts`](scripts/preflight.ts) is the gate, and it is written
+with this library — so every release exercises phases, tasks, `note`, `clean`,
+`when` and `retry` on real work:
+
+```
+› Quality
+  ✔ typecheck  1.2s
+  ✔ tests (120 passing in 9 files)  5.1s
+› Package
+  ✔ build  404ms
+  ✔ entry point resolves  0ms
+  ✔ tarball contents (47 files, 66kB)  180ms
+› Registry
+  ✔ version is unpublished  212ms
+```
+
+It checks the working tree is clean, typechecks all four projects separately so
+a failure names the one that broke, runs the suite, then imports `dist/index.js`
+the way a consumer would and asserts the public surface is actually there.
+`npm pack --dry-run` has to contain the entry point, its declarations, LICENSE
+and README — and must not leak `src/`, `test/`, `examples/` or `scripts/`.
+Finally it asks npm whether the version is already published.
+
+release-it runs it from `after:bump`, which is the first point at which
+package.json holds the version being released. A failure aborts before anything
+is committed, tagged or published.
 
 ## TypeScript layout
 

@@ -136,7 +136,7 @@ export interface StaleContext<In, Ctx> {
  * There is no key: the store *is* the identity. Whether an entry is still
  * usable is `stale`'s job, and nothing else's.
  */
-export interface CacheOptions<In = unknown, Ctx = unknown> {
+export interface CacheOptions<In = unknown, Ctx = unknown, Value = unknown> {
   store: CacheStore;
   /**
    * Return true to treat the stored entry as a miss — the work runs again and
@@ -150,10 +150,66 @@ export interface CacheOptions<In = unknown, Ctx = unknown> {
    * written by an older version of the script from feeding the wrong shape
    * into the context.
    */
-  schema?: StandardSchemaV1;
+  schema?: StandardSchemaV1<unknown, Value>;
 }
 
-export type CacheSource<In = unknown, Ctx = unknown> = CacheStore | CacheOptions<In, Ctx>;
+export type CacheSource<In = unknown, Ctx = unknown, Value = unknown> =
+  | CacheStore
+  | CacheOptions<In, Ctx, Value>;
+
+/**
+ * The value type a slot reads back as.
+ *
+ * A declared `schema` wins: it is the only thing actually *checked* against
+ * what came off the disk. With no schema the phase's own delta stands in —
+ * convenient, and right until an entry written by an older version of the
+ * script outlives the code that wrote it. That gap is what the shape guard on
+ * `read` exists to catch at the moment you touch a missing field.
+ */
+export type SlotValue<Schema, Delta> = unknown extends Schema ? Delta : Schema;
+
+/**
+ * `context.cache`, typed to the slots declared *before* this step.
+ *
+ * Invalidation flows backwards — a later step throwing away an earlier phase's
+ * entry — so only already-declared slots are addressable, which falls out of
+ * builder order for free. With no cached phases anywhere the slot type is
+ * `never` and every method is uncallable.
+ */
+export interface CacheHandle<Slots> {
+  /**
+   * The stored value, or `undefined` on a miss.
+   *
+   * Unless the slot declared a `schema`, the value is wrapped in a guard that
+   * throws {@link CacheShapeError} the moment you read a field the stored
+   * object does not have — which is how a cache written before a refactor
+   * announces itself instead of quietly yielding `undefined`. Pass
+   * `{ raw: true }` to opt out; do that before putting the value in the
+   * context, since the guard would otherwise travel with it into later steps.
+   */
+  read<K extends keyof Slots & string>(
+    slot: K,
+    options?: { raw?: boolean },
+  ): Promise<Slots[K] | undefined>;
+  /**
+   * Replace a slot outright. Values are not type-checked on the way in.
+   *
+   * The entry is restamped as written *now* unless `keepAge` is set. Reach for
+   * `keepAge` when correcting a value rather than refreshing it: a patch that
+   * resets the clock silently buys another full TTL for data that is still as
+   * old as it ever was — which matters most when the cache exists to stay
+   * inside someone's rate limit.
+   */
+  write<K extends keyof Slots & string>(
+    slot: K,
+    value: unknown,
+    options?: { keepAge?: boolean },
+  ): Promise<void>;
+  /** Drop a slot, so the next run does the work again. */
+  clear(slot: keyof Slots & string): Promise<void>;
+  /** Age of a slot's entry in ms, or `undefined` if there isn't one. */
+  ageOf(slot: keyof Slots & string): Promise<number | undefined>;
+}
 
 /**
  * What `run` is allowed to do with the caches this script declares.
@@ -198,7 +254,7 @@ export interface TaskListHandle<K extends string> {
 }
 
 /** Everything a handler gets: accumulated data plus the live terminal. */
-export interface StepContext<In, Ctx> {
+export interface StepContext<In, Ctx, Slots = {}> {
   /** The input the script was run with. */
   readonly input: In;
   /** Data produced by every step that has already succeeded. */
@@ -236,9 +292,15 @@ export interface StepContext<In, Ctx> {
 
   /** Attach a whole checklist at once, keyed for typed lookup. */
   tasks<const K extends readonly string[]>(labels: K): TaskListHandle<K[number]>;
+
+  /**
+   * Read, replace or drop the entries of cached phases declared earlier in
+   * this script. See {@link CacheHandle}.
+   */
+  readonly cache: CacheHandle<Slots>;
 }
 
-export interface RollbackContext<In, Ctx, Out> {
+export interface RollbackContext<In, Ctx, Out, Slots = {}> {
   readonly input: In;
   /**
    * Only the keys this step declared in `rollbackKeys`, as they stood when the
@@ -259,6 +321,9 @@ export interface RollbackContext<In, Ctx, Out> {
   /** Annotate the step's title, as in a handler. Replaces whatever it set. */
   note(message: string): void;
   progress(options: { total: number; label?: string; value?: number }): ProgressHandle;
+
+  /** Undoing work usually means the entry describing it is wrong too. */
+  readonly cache: CacheHandle<Slots>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -278,6 +343,7 @@ export interface StepDef<
   Ctx,
   Out,
   RollbackKeys extends readonly PropertyKey[] = readonly [],
+  Slots = {},
 > {
   name: string;
   description?: string;
@@ -285,7 +351,7 @@ export interface StepDef<
    * The work. Whatever object it resolves to is merged into `ctx` and becomes
    * visible — and typed — for every later step.
    */
-  handler: (context: StepContext<In, Ctx>) => Awaitable<Out>;
+  handler: (context: StepContext<In, Ctx, Slots>) => Awaitable<Out>;
   /**
    * The context keys this step's `rollback` needs. It receives only these
    * (none by default), and declaring them reserves them: neither this step nor
@@ -301,7 +367,12 @@ export interface StepDef<
    * step has already succeeded.
    */
   rollback?: (
-    context: RollbackContext<In, Prettify<RollbackData<Merge<Ctx, Out>, RollbackKeys>>, Out>,
+    context: RollbackContext<
+      In,
+      Prettify<RollbackData<Merge<Ctx, Out>, RollbackKeys>>,
+      Out,
+      Slots
+    >,
   ) => Awaitable<void>;
   /** Skip the step (and its rollback) when this resolves falsy. */
   when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;

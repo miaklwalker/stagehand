@@ -1,5 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+
+import { CacheShapeError, StepDefinitionError } from "./errors.js";
 
 import type {
   CacheMode,
@@ -28,13 +30,38 @@ export function memoryStore(): CacheStore {
 }
 
 /**
+ * In-process write queues, keyed by resolved path so two `fileStore` calls on
+ * the same file share one.
+ *
+ * Every write is a read-modify-write of the whole file, which is only correct
+ * if writes to that file never overlap. They otherwise lose each other's slots
+ * and race on the temp file. Cross-process safety is out of scope: two `node`
+ * processes writing one cache file can still interleave.
+ */
+const writeQueues = new Map<string, Promise<unknown>>();
+let tempCounter = 0;
+
+function serialize<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const next = (writeQueues.get(key) ?? Promise.resolve()).then(task, task);
+  // A failed write must not poison the writes queued behind it.
+  writeQueues.set(
+    key,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
+/**
  * One JSON file, holding every slot that points at it. Several phases may
- * share a path safely.
+ * share a path safely, and concurrent writes to one path are serialised.
  *
  * A missing, unreadable or malformed file all mean the same thing — no cache
  * yet — so deleting the file is always a valid way to start over. Values must
  * survive `JSON.stringify`; anything that does not (a `Date`, a class
- * instance) comes back as its JSON shape, which is what `schema` is for.
+ * instance) comes back as its JSON shape.
  */
 export function fileStore(filePath: string): CacheStore {
   const target = resolve(filePath);
@@ -50,29 +77,58 @@ export function fileStore(filePath: string): CacheStore {
   };
 
   // Written through a temp file so an interrupted run cannot leave a
-  // half-serialised cache behind for the next one to choke on.
+  // half-serialised cache behind for the next one to choke on. The temp name
+  // carries a counter as well as the pid — the pid alone is shared by every
+  // write in the process, which is exactly how concurrent writes used to
+  // rename each other's files out from under themselves.
   const writeAll = async (data: Record<string, unknown>): Promise<void> => {
     await mkdir(dirname(target), { recursive: true });
-    const temp = `${target}.${process.pid}.tmp`;
-    await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-    await rename(temp, target);
+    const payload = `${JSON.stringify(data, null, 2)}\n`;
+    const temp = `${target}.${process.pid}.${(tempCounter += 1)}.tmp`;
+
+    try {
+      await writeFile(temp, payload, "utf8");
+      try {
+        await rename(temp, target);
+      } catch (error) {
+        // Windows, antivirus, editors and file watchers can all hold the
+        // destination open and refuse the atomic swap. Writing in place gives
+        // up atomicity rather than the write.
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY" && code !== "EEXIST") {
+          throw error;
+        }
+        await writeFile(target, payload, "utf8");
+      }
+    } finally {
+      await rm(temp, { force: true });
+    }
   };
+
+  const update = (mutate: (data: Record<string, unknown>) => boolean): Promise<void> =>
+    serialize(target, async () => {
+      const data = await readAll();
+      if (!mutate(data)) return;
+      await writeAll(data);
+    });
 
   return {
     async read(slot) {
       const entry = (await readAll())[slot];
       return isEntry(entry) ? entry : undefined;
     },
-    async write(slot, entry) {
-      const data = await readAll();
-      data[slot] = entry;
-      await writeAll(data);
+    write(slot, entry) {
+      return update((data) => {
+        data[slot] = entry;
+        return true;
+      });
     },
-    async clear(slot) {
-      const data = await readAll();
-      if (!Object.hasOwn(data, slot)) return;
-      delete data[slot];
-      await writeAll(data);
+    clear(slot) {
+      return update((data) => {
+        if (!Object.hasOwn(data, slot)) return false;
+        delete data[slot];
+        return true;
+      });
     },
   };
 }
@@ -152,3 +208,108 @@ export async function writeCache(
 /** Identifies a phase's entry. Steps hang off their phase to avoid collisions. */
 export const phaseSlot = (phase: string): string => phase;
 export const stepSlot = (phase: string, step: string): string => `${phase}::${step}`;
+
+/* -------------------------------------------------------------------------- */
+/* Shape guard                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Properties every JavaScript runtime reaches for on an arbitrary object.
+ * Trapping them breaks `await` (which probes `then`), `JSON.stringify`,
+ * `console.log` and template interpolation — so they pass straight through.
+ */
+const PASSTHROUGH = new Set([
+  "then",
+  "toJSON",
+  "constructor",
+  "valueOf",
+  "toString",
+  "inspect",
+  "length",
+]);
+
+/**
+ * Wrap a value read back from a store so that touching a field it does not
+ * have throws {@link CacheShapeError} instead of yielding `undefined`.
+ *
+ * Only reads are trapped. Assigning a new property is how you'd legitimately
+ * patch an entry before writing it back, so it is left alone — the lie is
+ * always on the read side, where the type promised something the JSON lacks.
+ *
+ * Absent array indices pass through too: `orders[9]` on a short list is
+ * ordinary JavaScript, not a shape mismatch.
+ */
+export function guardShape<T>(value: T, slot: string, path = ""): T {
+  if (value === null || typeof value !== "object") return value;
+
+  return new Proxy(value as object, {
+    get(target, key, receiver) {
+      const actual = Reflect.get(target, key, receiver);
+      if (typeof key === "symbol" || PASSTHROUGH.has(key)) return actual;
+
+      const isIndex = Array.isArray(target) && /^(0|[1-9]\d*)$/.test(key);
+      const known = Object.hasOwn(target, key) || key in (Object.getPrototypeOf(target) ?? {});
+      if (!isIndex && !known) throw new CacheShapeError(slot, path ? `${path}.${key}` : key);
+
+      return guardShape(actual, slot, path ? `${path}.${key}` : key);
+    },
+  }) as T;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Handler-facing handle                                                       */
+/* -------------------------------------------------------------------------- */
+
+/** Which store backs each slot, and whether that slot validates on read. */
+export interface SlotBinding {
+  store: CacheStore;
+  schema: boolean;
+}
+
+/**
+ * Build the `cache` handle a handler sees. Slots it does not know about are
+ * already unreachable through the types; at runtime they throw rather than
+ * silently doing nothing, which is what a plain `store.clear("typo")` does.
+ */
+export function createCacheHandle(slots: Map<string, SlotBinding>): {
+  read(slot: string, options?: { raw?: boolean }): Promise<unknown>;
+  write(slot: string, value: unknown, options?: { keepAge?: boolean }): Promise<void>;
+  clear(slot: string): Promise<void>;
+  ageOf(slot: string): Promise<number | undefined>;
+} {
+  const bindingFor = (slot: string): SlotBinding => {
+    const binding = slots.get(slot);
+    if (!binding) {
+      const known = [...slots.keys()].map((name) => `"${name}"`).join(", ") || "none";
+      throw new StepDefinitionError(
+        slot,
+        `No cached phase named "${slot}" has been declared before this step. Known slots: ${known}.`,
+      );
+    }
+    return binding;
+  };
+
+  return {
+    async read(slot, options) {
+      const binding = bindingFor(slot);
+      const entry = await binding.store.read(slot);
+      if (!entry) return undefined;
+      // A slot with a schema was validated on the way in, so its type is
+      // already backed by a check; only the inferred kind needs guarding.
+      if (options?.raw || binding.schema) return entry.value;
+      return guardShape(entry.value, slot);
+    },
+    async write(slot, value, options) {
+      const store = bindingFor(slot).store;
+      const previous = options?.keepAge ? await store.read(slot) : undefined;
+      await store.write(slot, { value, savedAt: previous?.savedAt ?? Date.now() });
+    },
+    async clear(slot) {
+      await bindingFor(slot).store.clear(slot);
+    },
+    async ageOf(slot) {
+      const entry = await bindingFor(slot).store.read(slot);
+      return entry ? Math.max(0, Date.now() - entry.savedAt) : undefined;
+    },
+  };
+}
