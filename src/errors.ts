@@ -37,6 +37,27 @@ export class StepDefinitionError extends Error {
   }
 }
 
+/**
+ * Two phases, or two steps within one phase, were given the same name. Thrown
+ * while the script is being built.
+ *
+ * Names are not decoration: they label the frame, they are what `outline()`
+ * reports, and they identify a phase's or step's cache entry. Two units
+ * sharing a name share a slot, which surfaces as wrong data rather than as a
+ * failure — so it is refused up front.
+ */
+export class DuplicateNameError extends Error {
+  readonly kind: "phase" | "step";
+  readonly duplicate: string;
+
+  constructor(kind: "phase" | "step", duplicate: string, message: string) {
+    super(message);
+    this.name = "DuplicateNameError";
+    this.kind = kind;
+    this.duplicate = duplicate;
+  }
+}
+
 /** A step's handler threw. `cause` holds whatever it actually threw. */
 export class StepFailedError extends Error {
   readonly phase: string;
