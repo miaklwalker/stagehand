@@ -1,8 +1,17 @@
-export { Script, script, stepFor, type RunOptions } from "./script.js";
+export {
+  Script,
+  script,
+  stepFor,
+  routineFor,
+  type MountOptions,
+  type Routine,
+  type RunOptions,
+} from "./script.js";
 
 export { fileStore, memoryStore } from "./cache.js";
 
 export {
+  DuplicateNameError,
   RollbackFailedError,
   SchemaValidationError,
   ScriptAbortedError,

@@ -22,6 +22,7 @@
     "example:fail": "npm run build && node --experimental-strip-types examples/deploy.ts --fail",
     "example:checkout": "npm run build && node --experimental-strip-types examples/checkout.ts",
     "example:cache": "npm run build && node --experimental-strip-types examples/cache.ts",
+    "example:routine": "npm run build && node --experimental-strip-types examples/routine.ts",
     "example:resilience": "npm run build && node --experimental-strip-types examples/resilience.ts",
     "example:intake": "npm run build && node --experimental-strip-types examples/intake.ts",
     "example:modular": "npm run build && node --experimental-strip-types examples/modular.ts",

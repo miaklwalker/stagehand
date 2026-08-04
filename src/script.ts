@@ -2,6 +2,7 @@ import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { normalizeCache, phaseSlot, readCache, stepSlot, writeCache } from "./cache.js";
 import { createRollbackContext, createStepContext } from "./context.js";
 import {
+  DuplicateNameError,
   ScriptAbortedError,
   SchemaValidationError,
   StepDefinitionError,
@@ -10,6 +11,7 @@ import {
 } from "./errors.js";
 import { errorMessage, type PhaseState, type RunState, type StepState } from "./state.js";
 import type {
+  Awaitable,
   CacheMode,
   CacheSource,
   CleanField,
@@ -47,12 +49,87 @@ interface PhaseDefinition {
   name: string;
   options: PhaseOptions<unknown, unknown>;
   steps: AnyStepDef[];
+  /**
+   * Set when the phase arrived through `use()` with its own input. Every phase
+   * of one mount shares the binding, so the input resolves once per run and
+   * the whole fragment sees the same value.
+   */
+  mount?: MountBinding;
 }
 
 interface RuntimeStep {
   def: AnyStepDef;
   state: StepState;
   phaseName: string;
+}
+
+/**
+ * Keys for the phantom markers on {@link Script} and {@link Routine}. Exported
+ * only because declaration emit has to name them; there is no runtime value
+ * behind either and nothing should import them.
+ */
+export declare const REQUIRES: unique symbol;
+export declare const PRODUCES: unique symbol;
+
+/**
+ * Phases and steps recorded away from any particular script, ready to be
+ * spliced into one with {@link Script.use}.
+ *
+ * All four parameters are inferred — `In` and `Ctx` from the `routineFor<In,
+ * Ctx>()` call that declared the routine, `Out` and `Reserved` from the steps
+ * it went on to add.
+ */
+export interface Routine<
+  In,
+  Ctx extends object,
+  Out extends object,
+  Reserved extends PropertyKey,
+> {
+  /**
+   * Phantom. `In` and `Ctx` sit in contravariant position here, which is what
+   * makes a mount site prove it already offers at least this much input and
+   * context. Erased at compile time.
+   */
+  readonly [REQUIRES]: (context: { input: In; ctx: Ctx }) => void;
+  /** Phantom. Carries what the routine contributes so `use` can infer it. */
+  readonly [PRODUCES]: Out;
+  readonly name: string;
+}
+
+/** Recorded definition behind a {@link Routine}, kept off the public type. */
+interface RoutineBody {
+  name: string;
+  phases: PhaseDefinition[];
+  reserved: Set<string>;
+}
+
+/**
+ * What `use()` reads. Holds live references, and every `Script` registers
+ * itself on construction, so a script and a routine mount through one path.
+ */
+const bodies = new WeakMap<object, RoutineBody>();
+
+export interface MountOptions {
+  /**
+   * Prefix for the routine's phase names — `"Amazon"` turns `Fetch` into
+   * `Amazon / Fetch`. Required whenever the same routine is mounted twice,
+   * since phase names have to stay unique.
+   */
+  as?: string;
+}
+
+/**
+ * What a mount feeds its fragment instead of the host's own input — either a
+ * fixed value or a function of the host's input and context, resolved once
+ * when the mount is reached.
+ */
+export type MountInput<In, Ctx, SubIn> =
+  | SubIn
+  | ((context: { input: In; ctx: Ctx }) => Awaitable<SubIn>);
+
+/** Per-run resolution state for one mount. Identity is the map key. */
+interface MountBinding {
+  source: unknown;
 }
 
 export interface RunOptions {
@@ -98,13 +175,30 @@ export interface RunOptions {
  * through `rollbackKeys`, which is how `clean` knows what it may not remove.
  */
 export class Script<In = void, Ctx extends object = {}, Reserved extends PropertyKey = never> {
+  /**
+   * Phantom, erased at compile time. `run` is a *method*, so its parameter
+   * compares bivariantly and `In` would otherwise carry no safety across two
+   * `Script` types — a script needing `{ a, b }` would mount into a host
+   * offering only `{ a }`. A property-position function makes `In`
+   * contravariant, which is what `use()` relies on.
+   */
+  declare readonly [REQUIRES]: (input: In) => void;
+
   private readonly options: ScriptOptions;
   private readonly definition: PhaseDefinition[] = [];
   private readonly reserved = new Set<string>();
+  private readonly phaseNames = new Set<string>();
+  /** False right after `use()`, so a bare `addStep` cannot land in a fragment. */
+  private openPhase = false;
   private _schema: StandardSchemaV1 | undefined;
 
   constructor(options: ScriptOptions | string = {}) {
     this.options = typeof options === "string" ? { name: options } : options;
+    bodies.set(this, {
+      name: this.options.name ?? "script",
+      phases: this.definition,
+      reserved: this.reserved,
+    });
   }
 
   /**
@@ -162,6 +256,8 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
     const options =
       typeof optionsOrBuild === "function" ? {} : (optionsOrBuild ?? {});
 
+    this.claimPhaseName(name);
+    this.openPhase = true;
     this.definition.push({
       name,
       options: options as PhaseOptions<unknown, unknown>,
@@ -204,12 +300,105 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
     }
     for (const key of rollbackKeys) this.reserved.add(key);
 
-    this.currentPhase().steps.push(step);
+    const phase = this.currentPhase();
+    // Same reasoning as phase names: a step's cache slot is its phase and its
+    // own name, and the frame has no other way to tell two of them apart.
+    if (phase.steps.some((existing) => existing.name === step.name)) {
+      throw new DuplicateNameError(
+        "step",
+        step.name,
+        `Step "${step.name}" is already defined in phase "${phase.name}".`,
+      );
+    }
+    phase.steps.push(step);
     return this as unknown as Script<
       In,
       Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
       Reserved | RollbackKeys[number]
     >;
+  }
+
+  /**
+   * Splice a reusable fragment into this script. Its phases land here in
+   * order, and everything it produced is merged into the context — so the
+   * steps that follow see it, typed, exactly as if they had been written
+   * inline.
+   *
+   * The fragment states what it needs and TypeScript checks it at the mount
+   * site: a routine declared `routineFor<{ name: string }, { hash: string }>()`
+   * refuses to mount into a script whose input lacks `name`, or which has not
+   * produced `hash` yet.
+   *
+   * ```ts
+   * new Script<Input>({ name: "monthly report" })
+   *   .use(fetchChannel)
+   *   .addPhase("Report")
+   *   .addStep({ name: "aggregate", handler: ({ ctx }) => summarise(ctx.orders) });
+   * ```
+   *
+   * A plain {@link Script} mounts too, which is what keeps a reusable pipeline
+   * runnable on its own. Its own {@link ScriptOptions} — rollback mode,
+   * `logPlacement`, `silent` — are ignored in favour of the host's; only its
+   * phases and steps come across.
+   *
+   * @throws {DuplicateNameError} if a phase it brings is already defined here.
+   * Mount the same routine twice by naming each mount with `as`.
+   */
+  use<SubIn, Out extends object, R extends PropertyKey>(
+    routine: Routine<SubIn, Ctx, Out, R>,
+    options: MountOptions & { input: MountInput<In, Ctx, SubIn> },
+  ): Script<In, Merge<Ctx, Out>, Reserved | R>;
+  use<SubIn, Out extends object, R extends PropertyKey>(
+    script: Script<SubIn, Out, R>,
+    options: MountOptions & { input: MountInput<In, Ctx, SubIn> },
+  ): Script<In, Merge<Ctx, Out>, Reserved | R>;
+  // Script before Routine: on a failed call TypeScript reports the *last*
+  // overload's error, and "not assignable to Routine<...>" names the missing
+  // input or context key, where the Script variant would just list class
+  // members the caller never meant to supply.
+  use<Out extends object, R extends PropertyKey>(
+    script: Script<In, Out, R>,
+    options?: MountOptions,
+  ): Script<In, Merge<Ctx, Out>, Reserved | R>;
+  use<Out extends object, R extends PropertyKey>(
+    routine: Routine<In, Ctx, Out, R>,
+    options?: MountOptions,
+  ): Script<In, Merge<Ctx, Out>, Reserved | R>;
+  use(source: object, options: MountOptions & { input?: unknown } = {}): unknown {
+    const body = bodies.get(source);
+    if (!body) {
+      throw new StepDefinitionError(
+        "use",
+        "use() expects a routine from routineFor() or a Script; got something else",
+      );
+    }
+
+    // One binding for the whole mount, so two mounts of the same routine stay
+    // independent while the phases within one mount share an input.
+    const mount: MountBinding | undefined =
+      "input" in options ? { source: options.input } : undefined;
+
+    for (const phase of body.phases) {
+      const name = options.as ? `${options.as} / ${phase.name}` : phase.name;
+      this.claimPhaseName(name, body.name);
+      // Copied, so prefixing one mount cannot rename the routine itself and
+      // the host can never mutate a fragment other scripts are sharing.
+      this.definition.push({
+        name,
+        options: phase.options,
+        steps: [...phase.steps],
+        ...(mount ? { mount } : {}),
+      });
+    }
+
+    // The keys its rollbacks depend on stay reserved here too, or a later
+    // `clean` in the host could delete something a spliced rollback needs.
+    for (const key of body.reserved) this.reserved.add(key);
+
+    // The last phase spliced in belongs to the fragment; a bare addStep after
+    // this would quietly append to it.
+    this.openPhase = false;
+    return this;
   }
 
   /** Every step name, in execution order — handy for tests and docs. */
@@ -222,10 +411,40 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
   private currentPhase(): PhaseDefinition {
     const last = this.definition.at(-1);
-    if (last) return last;
+    if (last && this.openPhase) return last;
+    if (last && !this.openPhase) {
+      throw new StepDefinitionError(
+        "addStep",
+        `Cannot add a step after use(): "${last.name}" belongs to a mounted fragment. ` +
+          `Open a phase of your own with addPhase() first.`,
+      );
+    }
     const implicit: PhaseDefinition = { name: "Main", options: {}, steps: [] };
     this.definition.push(implicit);
+    this.phaseNames.add("Main");
+    this.openPhase = true;
     return implicit;
+  }
+
+  /**
+   * Phase names have to be unique: they are what the frame labels, what
+   * `outline()` reports, and — since the cache landed — what identifies a
+   * phase's stored entry. Two phases sharing a name share a cache slot, which
+   * reads as wrong data rather than as an error.
+   */
+  private claimPhaseName(name: string, from?: string): void {
+    if (!this.phaseNames.has(name)) {
+      this.phaseNames.add(name);
+      return;
+    }
+    throw new DuplicateNameError(
+      "phase",
+      name,
+      from
+        ? `Phase "${name}" from "${from}" is already defined in this script. ` +
+            `Name the mount with use(routine, { as: "..." }) to keep them apart.`
+        : `Phase "${name}" is already defined in this script.`,
+    );
   }
 
   /* ------------------------------------------------------------------------ */
@@ -281,7 +500,11 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
     const detach = this.attachCancellation(runController, rollbackController, runOptions.signal);
 
     const ctx = {} as Ctx & Record<string, unknown>;
-    const completed: Array<{ runtime: RuntimeStep; output: unknown }> = [];
+    // A mounted fragment sees whatever its mount resolved to, not the host's
+    // input — including in its rollbacks, which is why it travels with the
+    // completed entry.
+    const completed: Array<{ runtime: RuntimeStep; output: unknown; input: In }> = [];
+    const mountInputs = new Map<MountBinding, In>();
     const rollbacks: RollbackReport[] = [];
     let failure: { phase: string; step: string; error: unknown } | null = null;
 
@@ -299,7 +522,23 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
         renderer.onPhaseStart(phaseState);
 
-        if (phase.options.when && !(await phase.options.when({ input, ctx }))) {
+        // Resolved before `when`, so a mounted phase's own condition is asked
+        // about the input the fragment will actually run with.
+        let phaseInput = input;
+        if (phase.mount) {
+          if (!mountInputs.has(phase.mount)) {
+            const source = phase.mount.source;
+            mountInputs.set(
+              phase.mount,
+              (typeof source === "function"
+                ? await (source as (context: { input: In; ctx: Ctx }) => Awaitable<In>)({ input, ctx })
+                : source) as In,
+            );
+          }
+          phaseInput = mountInputs.get(phase.mount) as In;
+        }
+
+        if (phase.options.when && !(await phase.options.when({ input: phaseInput, ctx }))) {
           for (const item of phaseSteps) {
             item.state.status = "skipped";
             drop(ctx, item.def.clean);
@@ -314,7 +553,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
         if (phaseCache) {
           const hit = await safely(
-            () => readCache(phaseCache, slot, input, ctx, cacheMode),
+            () => readCache(phaseCache, slot, phaseInput, ctx, cacheMode),
             { hit: false } as const,
             `read for phase "${phase.name}"`,
             renderer,
@@ -352,7 +591,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
             break phaseLoop;
           }
 
-          if (item.def.when && !(await item.def.when({ input, ctx }))) {
+          if (item.def.when && !(await item.def.when({ input: phaseInput, ctx }))) {
             item.state.status = "skipped";
             drop(ctx, item.def.clean);
             drop(delta, item.def.clean);
@@ -366,7 +605,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
           if (stepCache) {
             const hit = await safely(
-              () => readCache(stepCache, stepKey, input, ctx, cacheMode),
+              () => readCache(stepCache, stepKey, phaseInput, ctx, cacheMode),
               { hit: false } as const,
               `read for step "${item.state.name}"`,
               renderer,
@@ -394,7 +633,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
           let output: unknown;
           try {
-            output = await this.executeStep(item, input, ctx, runController.signal, renderer);
+            output = await this.executeStep(item, phaseInput, ctx, runController.signal, renderer);
             item.state.status = "success";
             item.state.endedAt = performance.now();
             delete item.state.statusText;
@@ -405,7 +644,7 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
             // keeps its own copy, so this step's rollback is unaffected.
             drop(ctx, item.def.clean);
             drop(delta, item.def.clean);
-            completed.push({ runtime: item, output });
+            completed.push({ runtime: item, output, input: phaseInput });
             renderer.onStepEnd(item.state);
             renderer.refresh();
           } catch (error) {
@@ -449,7 +688,6 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
         await this.unwind(
           completed,
           failure,
-          input,
           ctx,
           state,
           rollbacks,
@@ -570,9 +808,8 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
 
   /** Compensate completed steps in reverse order. */
   private async unwind(
-    completed: Array<{ runtime: RuntimeStep; output: unknown }>,
+    completed: Array<{ runtime: RuntimeStep; output: unknown; input: In }>,
     failure: { phase: string; step: string; error: unknown },
-    input: In,
     ctx: Ctx,
     state: RunState,
     rollbacks: RollbackReport[],
@@ -597,7 +834,9 @@ export class Script<In = void, Ctx extends object = {}, Reserved extends Propert
       try {
         const context = createRollbackContext(
           { renderer, step: entry.runtime.state, phaseName: entry.runtime.phaseName },
-          input,
+          // The input this step actually ran with — a mounted fragment's
+          // rollback sees its mount's input, not the host's.
+          entry.input,
           // Only what the step asked for — nothing by default. Reserved keys
           // can never be cleaned, so they are all still here.
           pick(ctx, entry.runtime.def.rollbackKeys),
@@ -766,6 +1005,45 @@ export function stepFor<In, Ctx extends object = {}>() {
   return <Out extends object | void, const RollbackKeys extends readonly PropertyKey[] = readonly []>(
     def: StepDef<In, Ctx, Out, RollbackKeys>,
   ): StepDef<In, Ctx, Out, RollbackKeys> => def;
+}
+
+/**
+ * Declare phases and steps away from any particular script, then mount them
+ * with {@link Script.use}.
+ *
+ * The two parameters are the *minimum* the fragment needs — the input it
+ * reads, and the context it expects to already exist — exactly as they are for
+ * {@link stepFor}. Whatever it produces flows on into whichever script mounts
+ * it, and any script that cannot satisfy the requirement is a compile error at
+ * the `use()` call, not an `undefined` at run time.
+ *
+ * ```ts
+ * export const fetchChannel = routineFor<{ channel: string }>()("fetch channel", (s) =>
+ *   s
+ *     .addPhase("Fetch")
+ *     .addStep({ name: "authenticate", handler: … })
+ *     .addStep({ name: "pull orders", handler: … })
+ *     .addPhase("Normalize")
+ *     .addStep({ name: "dedupe", handler: … }),
+ * );
+ * ```
+ *
+ * A routine owns whole phases, so phase-level options — `when`, `cache` —
+ * travel with it.
+ */
+export function routineFor<In, Ctx extends object = {}>() {
+  return <Out extends object, R extends PropertyKey>(
+    name: string,
+    build: (script: Script<In, Ctx, never>) => Script<In, Out, R>,
+  ): Routine<In, Ctx, Out, R> => {
+    const built = build(new Script<In, Ctx, never>(name));
+    const body = bodies.get(built);
+    if (!body) throw new StepDefinitionError(name, `routineFor("${name}") must return the script it was given`);
+
+    const routine = { name } as Routine<In, Ctx, Out, R>;
+    bodies.set(routine, { ...body, name });
+    return routine;
+  };
 }
 
 /** Convenience factory so callers can skip `new`. */

@@ -429,9 +429,119 @@ script has actually produced `Ctx` by that point. Dropping a step that needs
 `{ user: User }` into a script that has not loaded a user yet is a compile
 error, not a runtime `undefined`.
 
+## Reusable scripts
+
+`routineFor` does for whole phases what `stepFor` does for one step. Declare a
+fragment once, mount it wherever it fits:
+
+```ts
+// routines/channel.ts
+export const pullChannel = routineFor<{ channel: string; since: string }>()(
+  "pull channel",
+  (script) =>
+    script
+      .addPhase("Fetch", { cache: { store: cache, stale: … } })
+      .addStep({ name: "authenticate", handler: … })
+      .addStep({ name: "pull orders", handler: … })
+      .addPhase("Normalize")
+      .addStep({ name: "dedupe and total", handler: … }),
+);
+```
+
+```ts
+new Script<Input>({ name: "channel sync" })
+  .use(pullChannel)
+  .addPhase("Validation")
+  .addStep({ name: "check totals", handler: ({ ctx }) => … })   // ctx.orderCount, ctx.gross
+
+// months later, a different job entirely
+new Script<ReportInput>({ name: "monthly report" })
+  .use(pullChannel)
+  .addPhase("Report")
+  .addStep({ name: "build summary", handler: ({ ctx }) => … })
+```
+
+The two parameters on `routineFor<In, Ctx>()` are the **minimum** the fragment
+needs — the input it reads, and the context it expects to already exist. Both
+are checked at the `use()` call:
+
+```
+Property 'hash' is missing in type '{}' but required in type '{ hash: string; }'.
+```
+
+A plain `Script` mounts too, which is what keeps a pipeline runnable on its
+own — `pipeline.run(input)` today, `.use(pipeline)` tomorrow. Its own
+`ScriptOptions` (rollback mode, `logPlacement`, `silent`) are ignored in favour
+of the host's; only its phases and steps come across.
+
+**Everything travels with the fragment.** Phase-level `when` and `cache`,
+step-level `retry`, `clean`, `rollback` — a spliced rollback compensates during
+the host's unwind, and keys it reserved through `rollbackKeys` stay reserved in
+the host, so a later `clean` there still can't delete them.
+
+That combines well with caching: mount a routine whose phase caches, and the
+second script to mount it gets the data the first one pulled.
+
+```
+› Fetch
+  ⊙ authenticate  cached
+  ⊙ pull orders  cached
+› Report
+  ✔ build summary (avg 24.50)  263ms
+```
+
+### Giving a mount its own input
+
+A mount can feed its fragment something other than the host's input — which is
+what lets one routine serve two storefronts, each with its own credentials:
+
+```ts
+new Script<{ since: string; amazonKey: string; shopifyKey: string }>({ name: "all channels" })
+  .use(pullChannel, {
+    as: "Amazon",
+    input: ({ input }) => ({ channel: "amazon", since: input.since, apiKey: input.amazonKey }),
+  })
+  .use(pullChannel, {
+    as: "Shopify",
+    input: ({ input }) => ({ channel: "shopify", since: input.since, apiKey: input.shopifyKey }),
+  })
+```
+
+`input` takes a fixed value or a function of `{ input, ctx }`, and may be
+async. It is resolved **once per mount**, when the mount is reached, and every
+phase and step of that fragment sees the result — including its `when`, its
+`cache`, and its rollbacks during an unwind.
+
+With a mapper the host no longer has to match the routine's input shape at all;
+it only has to produce it. TypeScript checks the return value:
+
+```
+Property 'apiKey' is missing in type '{ channel: string; }' but required in type 'ChannelInput'.
+```
+
+Without one, the host's own input must satisfy the routine, as `stepFor` steps
+require.
+
+**Mounting twice** needs `as`, because phase names have to stay unique:
+
+```ts
+.use(pullChannel, { as: "Amazon" })     // → "Amazon / Fetch", "Amazon / Normalize"
+.use(pullChannel, { as: "Shopify" })
+```
+
+Without it you get a `DuplicateNameError` at build time. That rule is not
+routine-specific — two phases anywhere in a script, or two steps within one
+phase, are refused. Names label the frame, are what `outline()` reports, and
+identify a cache entry; two units sharing a name share a slot, which surfaces
+as wrong data rather than as a failure.
+
+A routine owns whole phases, so `addStep` directly after `use()` is refused
+too — open a phase of your own first, rather than quietly appending to a
+fragment someone else's script also mounts.
+
 ## Examples
 
-Eight runnable scripts, each aimed at a different part of the API. Most take a
+Nine runnable scripts, each aimed at a different part of the API. Most take a
 flag to switch between the happy path and the interesting one.
 
 | | |
@@ -443,6 +553,7 @@ flag to switch between the happy path and the interesting one.
 | [`modular.ts`](examples/modular.ts) | `stepFor` steps living in [`steps/tenancy.ts`](examples/steps/tenancy.ts), shared by two unrelated scripts — the imported rollback compensates in both. `-- --fail` |
 | [`log-placement.ts`](examples/log-placement.ts) | The same script run three times, once per `logPlacement` value, so the difference is visible directly |
 | [`cache.ts`](examples/cache.ts) | A cached `Build` phase and a cached step. Run it twice to watch the second run skip both. `-- --fresh` to rebuild and overwrite |
+| [`routine.ts`](examples/routine.ts) | One reusable fragment in [`routines/channel.ts`](examples/routines/channel.ts), mounted by a sync script and, months later, a report that maps its own input onto the routine's — and gets the pull from cache. `-- --multi` mounts it twice, one storefront and API key per mount |
 | [`validate.ts`](examples/validate.ts) | The smallest thing that runs: two steps, `rollback: "none"` |
 
 ```
@@ -450,6 +561,7 @@ npm run example:checkout -- --ok
 npm run example:resilience -- --cancel
 npm run example:intake -- --bad
 npm run example:modular -- --fail
+npm run example:routine -- --multi
 npm run example:log-placement
 ```
 
