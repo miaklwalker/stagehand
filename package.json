@@ -1,6 +1,6 @@
 {
   "name": "@michaelrwalker/stagehand",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Fully typesafe saga-style script framework with modern terminal visuals",
   "type": "module",
   "exports": {
