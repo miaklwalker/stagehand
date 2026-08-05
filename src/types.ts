@@ -84,7 +84,7 @@ export type RunStatus = "pending" | "running" | "success" | "failed" | "aborted"
  *
  * `"step"` and `"bottom"` trade completeness for locality — both cap what
  * they keep, so reach for `"scrollback"` when the log is the thing you need
- * to still have after the run. Only the live renderer honours this; the
+ * to still have after the run. Only the live renderer honors this; the
  * plain/CI renderer prints every line immediately as it happens regardless,
  * which is already both complete and in place.
  */
@@ -226,7 +226,7 @@ export type CacheMode = "on" | "off" | "refresh" | "read-only";
 /* -------------------------------------------------------------------------- */
 
 export interface ProgressHandle {
-  /** Set the absolute value, optionally relabelling the bar. */
+  /** Set the absolute value, optionally relabeling the bar. */
   update(value: number, label?: string): void;
   /** Advance by `by` (default 1). */
   increment(by?: number): void;
@@ -259,14 +259,14 @@ export interface StepContext<In, Ctx, Slots = {}> {
   readonly input: In;
   /** Data produced by every step that has already succeeded. */
   readonly ctx: Ctx;
-  /** Aborts on timeout, on Ctrl-C, or when `run` is cancelled. */
+  /** Aborts on timeout, on Ctrl-C, or when `run` is canceled. */
   readonly signal: AbortSignal;
   /** 1 on the first try, 2 on the first retry, and so on. */
   readonly attempt: number;
   readonly phase: string;
   readonly step: string;
 
-  /** Where this lands is controlled by `logPlacement` (default: a permanent line above the live frame, kept in scrollback). */
+  /** Where these land is controlled by `logPlacement` (default: a permanent line above the live frame, kept in scrollback). */
   log(message: string): void;
   info(message: string): void;
   warn(message: string): void;
@@ -315,7 +315,7 @@ export interface RollbackContext<In, Ctx, Out, Slots = {}> {
   readonly phase: string;
   readonly step: string;
 
-  /** Where this lands is controlled by `logPlacement`, as in a handler. */
+  /** Where these land is controlled by `logPlacement`, as in a handler. */
   log(message: string): void;
   status(message: string): void;
   /** Annotate the step's title, as in a handler. Replaces whatever it set. */
@@ -359,7 +359,7 @@ export interface StepDef<
    * there if the rollback runs.
    *
    * `output` is unaffected — a rollback always gets its own step's return
-   * value in full, whether or not it was cleaned from the context.
+   * value in full, just it was cleaned from the context.
    */
   rollbackKeys?: RollbackKeys & readonly (keyof Merge<Ctx, Out>)[];
   /**
@@ -391,6 +391,57 @@ export interface StepDef<
   retry?: RetryPolicy;
   timeoutMs?: number;
 }
+
+/**
+ * The context a later step sees, given a step that ran before it and whatever
+ * else is already there. Spares you from restating a step's return shape by
+ * hand just to declare the next step's `Ctx`.
+ *
+ * ```ts
+ * export const logIntoDb = stepFor<Input>()({
+ *   name: "log into db",
+ *   handler: async () => ({ conn: await connect() }),
+ * });
+ *
+ * export const loadRules = stepFor<
+ *   Input,
+ *   WithStepFor<typeof logIntoDb, { conditions: Array<{ name: string }> }>
+ * >()({
+ *   name: "load rules",
+ *   //     ctx.conn — from the step; ctx.conditions — from the rest
+ *   handler: ({ ctx }) => ({ rules: ctx.conn.query(ctx.conditions) }),
+ * });
+ * ```
+ *
+ * It nests, so a chain of steps composes without a separate variadic form:
+ *
+ * ```ts
+ * WithStepFor<typeof second, WithStepFor<typeof first, { conditions: string[] }>>
+ * ```
+ *
+ * Read that inside out — start with `conditions`, add what `first` returns,
+ * then what `second` returns — which is also the precedence: on a name
+ * collision the outermost step wins, matching the way a later step's return
+ * value shadows an earlier key at runtime. Order the nesting to match the
+ * order the steps actually run in and the two agree.
+ *
+ * Only the step's *output* is read. Its own `Ctx` requirement is not checked
+ * against `Rest`, since the two are declared independently; `addStep` is still
+ * where a step meeting an insufficient context is caught.
+ *
+ * A step returning nothing leaves `Rest` untouched, and an `async` handler is
+ * awaited first, so both fall out without a special case.
+ */
+export type WithStepFor<
+  // Structural on purpose: the handler's return type is the only place `Out`
+  // sits covariantly. `StepDef` itself is invariant in `Out` — `rollback`
+  // takes it as a parameter — so inferring off the interface would force the
+  // caller's step to match an unsatisfiable bound.
+  Step extends { handler: (context: never) => unknown },
+  Rest extends object = {},
+> = Step extends { handler: (context: never) => infer Out }
+  ? Merge<Rest, Awaited<Out>>
+  : never;
 
 export interface PhaseOptions<In = unknown, Ctx = unknown> {
   description?: string;

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    // The point of this project: force the emitter to write down every
+    // inferred public type, so an unnameable one fails the build.
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    // Self-referencing the package by name makes the project root load-bearing
+    // for resolving the `exports` map, so it has to be explicit (TS2209).
+    "rootDir": ".",
+    "outDir": "../../.portability-check"
+  },
+  "include": ["."]
+}

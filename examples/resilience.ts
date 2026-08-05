@@ -19,7 +19,7 @@ const mode = {
  * A sleep that loses the race when the step is aborted. Handlers get a
  * `signal` that fires on timeout, on Ctrl-C, and on an external cancel — real
  * work (fetch, child processes, database drivers) should be handed the same
- * signal so a cancelled step stops immediately instead of running to
+ * signal. A canceled step stops immediately instead of running to
  * completion in the background.
  */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

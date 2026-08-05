@@ -39,7 +39,7 @@ const checkout = new Script<Order>({
       const units = input.items.reduce((sum, item) => sum + item.qty, 0);
       note(`${units} units`);
       // The card token lands in the context so a later step can consume it —
-      // and so this example has something worth cleaning up afterwards.
+      // and so this example has something worth cleaning up afterward.
       return { total: units * 24.5, units, cardToken: input.cardToken };
     },
   })

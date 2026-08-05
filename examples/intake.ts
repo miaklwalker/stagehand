@@ -63,7 +63,7 @@ const intake = new Script({ name: "intake", description: "Pull a feed, clean it,
       .addStep({
         name: "download rows",
         handler: async ({ input, progress, note }) => {
-          // A progress bar, relabelled as it goes.
+          // A progress bar, relabeled as it goes.
           const bar = progress({ total: input.rows, label: "streaming" });
           for (let read = 0; read < input.rows; read += 25) {
             bar.update(read, read > input.rows / 2 ? "buffering" : "streaming");

@@ -3,8 +3,13 @@ export {
   script,
   stepFor,
   routineFor,
+  type CachedPhaseOptions,
+  type ClosedPhase,
+  type Commit,
   type MountInput,
   type MountOptions,
+  type Mounted,
+  type OpenPhase,
   type Routine,
   type RunOptions,
 } from "./script.js";
@@ -54,6 +59,7 @@ export type {
   StepStatus,
   TaskHandle,
   TaskListHandle,
+  WithStepFor,
 } from "./types.js";
 
 export { formatDuration } from "./state.js";

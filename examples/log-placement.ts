@@ -17,9 +17,9 @@
  *
  *   npm run example:log-placement
  *
- * Only the live (TTY) renderer honours this — pipe the output and every
+ * Only the live (TTY) renderer honors this — pipe the output and every
  * placement falls back to printing each line immediately, in place, since a
- * plain scrolling log has no other sensible behaviour.
+ * plain scrolling log has no other sensible behavior.
  */
 import { Script, type LogPlacement } from "../dist/index.js";
 

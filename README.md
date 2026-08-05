@@ -483,6 +483,23 @@ script has actually produced `Ctx` by that point. Dropping a step that needs
 `{ user: User }` into a script that has not loaded a user yet is a compile
 error, not a runtime `undefined`.
 
+Writing the next step in a chain means restating what the previous one returns.
+`WithStepFor<Step, Rest>` computes that instead — the step's output merged over
+whatever else the context already holds — and nests for longer chains:
+
+```ts
+export const loadRules = stepFor<
+  Input,
+  WithStepFor<typeof logIntoDb, { conditions: Array<{ name: string }> }>
+>()({
+  name: "load rules",
+  handler: ({ ctx }) => ({ rules: ctx.conn.query(ctx.conditions) }),
+});
+
+// longer chains nest, innermost first
+WithStepFor<typeof second, WithStepFor<typeof first, { conditions: string[] }>>
+```
+
 ## Reusable scripts
 
 `routineFor` does for whole phases what `stepFor` does for one step. Declare a

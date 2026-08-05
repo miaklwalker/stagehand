@@ -80,7 +80,7 @@ const sync = new Script<{ channel: string }>({
           if (!(error instanceof CacheShapeError)) throw error;
           warn(`${error.name}: ${error.path} is missing from "${error.slot}"`);
           await cache.clear("Fetch");
-          success("dropped the stale entry — the next run repulls");
+          success("dropped the stale entry — the next run re-fetches");
         }
         return {};
       }
