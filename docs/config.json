@@ -1,0 +1,35 @@
+{
+  "sections": [
+    {
+      "label": "Getting Started",
+      "children": [
+        { "label": "Overview", "to": "overview" },
+        { "label": "Installation", "to": "installation" },
+        { "label": "Quick Start", "to": "quick-start" }
+      ]
+    },
+    {
+      "label": "Guides",
+      "children": [
+        { "label": "Phases and Steps", "to": "guides/phases-and-steps" },
+        { "label": "The Typed Context", "to": "guides/typed-context" },
+        { "label": "Rollbacks", "to": "guides/rollbacks" },
+        { "label": "Cleaning Context Keys", "to": "guides/cleaning-context" },
+        { "label": "The Handler Surface", "to": "guides/handler-surface" },
+        { "label": "Caching", "to": "guides/caching" },
+        { "label": "Script Options and Results", "to": "guides/script-options-and-result" },
+        { "label": "Splitting Steps Across Files", "to": "guides/splitting-steps" },
+        { "label": "Reusable Scripts and Mounts", "to": "guides/reusable-scripts" },
+        { "label": "Terminal Rendering", "to": "guides/terminal-rendering" }
+      ]
+    },
+    {
+      "label": "Reference",
+      "children": [
+        { "label": "Script", "to": "reference/script" },
+        { "label": "Cache Stores", "to": "reference/cache" },
+        { "label": "Errors", "to": "reference/errors" }
+      ]
+    }
+  ]
+}
