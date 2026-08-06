@@ -169,6 +169,18 @@ export type CacheSource<In = unknown, Ctx = unknown, Value = unknown> =
 export type SlotValue<Schema, Delta> = unknown extends Schema ? Delta : Schema;
 
 /**
+ * Stand-in for a step that cannot know the host's slots — one written with
+ * {@link stepFor}, or a hand-written {@link StepDef}. Every name is accepted
+ * and values read back as `unknown`.
+ *
+ * The alternative default, `{}`, makes `keyof Slots & string` resolve to
+ * `never` and quietly renders the whole handle uncallable, which reads as
+ * "the cache is missing" rather than "this step never declared its slots".
+ * Pass the slots explicitly to get them checked.
+ */
+export type UnknownSlots = Record<string, unknown>;
+
+/**
  * `context.cache`, typed to the slots declared *before* this step.
  *
  * Invalidation flows backwards — a later step throwing away an earlier phase's
@@ -254,7 +266,7 @@ export interface TaskListHandle<K extends string> {
 }
 
 /** Everything a handler gets: accumulated data plus the live terminal. */
-export interface StepContext<In, Ctx, Slots = {}> {
+export interface StepContext<In, Ctx, Slots = UnknownSlots> {
   /** The input the script was run with. */
   readonly input: In;
   /** Data produced by every step that has already succeeded. */
@@ -300,7 +312,7 @@ export interface StepContext<In, Ctx, Slots = {}> {
   readonly cache: CacheHandle<Slots>;
 }
 
-export interface RollbackContext<In, Ctx, Out, Slots = {}> {
+export interface RollbackContext<In, Ctx, Out, Slots = UnknownSlots> {
   readonly input: In;
   /**
    * Only the keys this step declared in `rollbackKeys`, as they stood when the
@@ -343,7 +355,7 @@ export interface StepDef<
   Ctx,
   Out,
   RollbackKeys extends readonly PropertyKey[] = readonly [],
-  Slots = {},
+  Slots = UnknownSlots,
 > {
   name: string;
   description?: string;

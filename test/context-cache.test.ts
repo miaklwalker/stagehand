@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { CacheShapeError, Script, memoryStore, routineFor } from "../dist/index.js";
+import {
+  CacheShapeError,
+  type Routine,
+  Script,
+  memoryStore,
+  routineFor,
+  stepFor,
+} from "../dist/index.js";
 
 const quiet = { silent: true, handleSignals: false } as const;
 
@@ -373,4 +380,190 @@ test("write restamps the entry, and keepAge preserves the original clock", async
 
   await build(false).run();
   assert.ok((await store.read("Fetch"))!.savedAt > ancient, "without it the entry is restamped");
+});
+
+test("a stepFor step can use the cache without knowing the host's slots", async () => {
+  const store = memoryStore();
+  let cleared = false;
+
+  // A step written in its own file cannot know what the host declared, so its
+  // slots default to unchecked rather than to `never` — which would silently
+  // make `context.cache` uncallable.
+  const look = stepFor<{ channel: string }, { rows: string[] }>()({
+    name: "look",
+    handler: async ({ cache }) => {
+      await cache.clear("Fetch");
+      cleared = true;
+      return {};
+    },
+  });
+
+  const pull = routineFor<{ channel: string }>()("pull", (s) =>
+    s
+      .addPhase("Fetch", { cache: { store } })
+      .addStep({ name: "pull", handler: ({ input }) => ({ rows: [input.channel] }) }),
+  );
+
+  await new Script<{ channel: string }>({ name: "t", ...quiet })
+    .use(pull)
+    .addPhase("Check")
+    .addStep(look)
+    .run({ channel: "amazon" });
+
+  assert.equal(cleared, true);
+  assert.equal(await store.read("Fetch"), undefined);
+});
+
+test("a stepFor step may declare the slots it expects, and they are checked", () => {
+  const look = stepFor<{ channel: string }, {}, { Fetch: { rows: string[] } }>()({
+    name: "look",
+    handler: async ({ cache }) => {
+      const entry = await cache.read("Fetch");
+      entry?.rows[0]?.toUpperCase();
+      // @ts-expect-error - not a slot this step declared
+      await cache.clear("Nope");
+      return {};
+    },
+  });
+
+  assert.equal(look.name, "look");
+});
+
+test("a routine annotated without its slot map still exposes the cache", async () => {
+  const store = memoryStore();
+  let cleared = false;
+
+  // What an exported routine looks like when the author writes the type out —
+  // `Routine<In, Ctx, Out, Reserved>` omits the slot map, which used to
+  // collapse the host's slots to `never` and silently disable context.cache.
+  const pull: Routine<{ channel: string }, {}, { rows: string[] }, never> = routineFor<{
+    channel: string;
+  }>()("pull", (s) =>
+    s
+      .addPhase("Fetch", { cache: { store } })
+      .addStep({ name: "pull", handler: ({ input }) => ({ rows: [input.channel] }) }),
+  );
+
+  await new Script<{ channel: string }>({ name: "t", ...quiet })
+    .use(pull)
+    .addPhase("Check")
+    .addStep({
+      name: "look",
+      handler: async ({ cache }) => {
+        await cache.clear("Fetch");
+        cleared = true;
+        return {};
+      },
+    })
+    .run({ channel: "amazon" });
+
+  assert.equal(cleared, true);
+  assert.equal(await store.read("Fetch"), undefined);
+});
+
+test("an unannotated routine keeps its slot names checked", () => {
+  const store = memoryStore();
+
+  const pull = routineFor<{ channel: string }>()("pull", (s) =>
+    s
+      .addPhase("Fetch", { cache: { store } })
+      .addStep({ name: "pull", handler: ({ input }) => ({ rows: [input.channel] }) }),
+  );
+
+  new Script<{ channel: string }>({ name: "t", ...quiet })
+    .use(pull)
+    .addPhase("Check")
+    .addStep({
+      name: "look",
+      handler: async ({ cache }) => {
+        const entry = await cache.read("Fetch");
+        entry?.rows[0]?.toUpperCase();
+        // @ts-expect-error - inference is intact, so a bad name is still caught
+        await cache.clear("Nope");
+        return {};
+      },
+    });
+
+  assert.ok(true);
+});
+
+/* -- Step-level slots ------------------------------------------------------ */
+
+test("a cached step contributes its own slot, readable by later steps", async () => {
+  const store = memoryStore();
+  const seen: unknown[] = [];
+
+  await new Script({ name: "t", ...quiet })
+    .addPhase("Fetch")
+    .addStep({
+      name: "pull orders",
+      cache: { store },
+      handler: () => ({ orders: [{ sku: "a" }] }),
+    })
+    .addPhase("Check")
+    .addStep({
+      name: "look",
+      handler: async ({ cache }) => {
+        const entry = await cache.read("Fetch::pull orders");
+        seen.push(entry?.orders[0]?.sku);
+        await cache.clear("Fetch::pull orders");
+        return {};
+      },
+    })
+    .run();
+
+  assert.deepEqual(seen, ["a"]);
+  assert.equal(await store.read("Fetch::pull orders"), undefined);
+});
+
+test("a step slot inside a routine follows the mount's prefix", async () => {
+  const store = memoryStore();
+  const seen: unknown[] = [];
+
+  const pull = routineFor<{ channel: string }>()("pull", (s) =>
+    s
+      .addPhase("Fetch")
+      .addStep({
+        name: "pull",
+        cache: { store },
+        handler: ({ input }) => ({ rows: [input.channel] }),
+      }),
+  );
+
+  await new Script<{ channel: string }>({ name: "t", ...quiet })
+    .use(pull, { as: "Amazon" })
+    .addPhase("Check")
+    .addStep({
+      name: "look",
+      handler: async ({ cache }) => {
+        seen.push((await cache.read("Amazon / Fetch::pull"))?.rows);
+        return {};
+      },
+    })
+    .run({ channel: "amazon" });
+
+  assert.deepEqual(seen, [["amazon"]]);
+});
+
+test("step slots are typed, and only exist when the step caches", () => {
+  const store = memoryStore();
+
+  new Script({ name: "t", ...quiet })
+    .addPhase("Fetch")
+    .addStep({ name: "pull", cache: { store }, handler: () => ({ orders: [{ sku: "a" }] }) })
+    .addStep({ name: "plain", handler: () => ({ n: 1 }) })
+    .addPhase("Check")
+    .addStep({
+      name: "look",
+      handler: async ({ cache }) => {
+        (await cache.read("Fetch::pull"))?.orders[0]?.sku.toUpperCase();
+        // @ts-expect-error - "plain" declared no cache
+        await cache.clear("Fetch::plain");
+        // @ts-expect-error - single colon; the separator is "::"
+        await cache.clear("Fetch:pull");
+        return {};
+      },
+    });
+
+  assert.ok(true);
 });

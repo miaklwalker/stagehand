@@ -33,6 +33,7 @@ import type {
   ScriptOptions,
   SlotValue,
   StepDef,
+  UnknownSlots,
   StepReport,
 } from "./types.js";
 import { createRenderer, type Renderer } from "./ui/renderer.js";
@@ -93,7 +94,11 @@ export interface Routine<
   Ctx extends object,
   Out extends object,
   Reserved extends PropertyKey,
-  Slots = {},
+  // Unchecked rather than `{}`: writing `Routine<In, Ctx, Out, never>` by hand
+  // — which is what an annotated export across a module boundary looks like —
+  // would otherwise collapse the host's slots to `never` and silently disable
+  // `context.cache` for every step after the mount.
+  Slots = UnknownSlots,
 > {
   /**
    * Phantom. `In` and `Ctx` sit in contravariant position here, which is what
@@ -161,14 +166,22 @@ interface MountBinding {
  * is why no separate "is anything open" flag is needed.
  */
 export interface OpenPhase {
+  /** The phase's cache slot, or `never` when the phase declared no cache. */
   name: string | never;
+  /**
+   * The phase's name, cached or not — a step's slot is `phase::step`, so a
+   * cached step inside an uncached phase still needs it.
+   */
+  phase: string;
   /** The `schema`'s output type, or `unknown` when none was declared. */
   schema: unknown;
   /** What this phase's steps have contributed so far. */
   delta: object;
 }
 
-export type ClosedPhase = { name: never; schema: unknown; delta: {} };
+/** No phase open yet: steps land in the implicit "Main" phase. */
+export type ClosedPhase = { name: never; phase: "Main"; schema: unknown; delta: {} };
+
 
 /** Fold the open phase's slot into the map. A no-op for uncached phases. */
 export type Commit<Slots, Open extends OpenPhase> = Slots &
@@ -295,12 +308,25 @@ export class Script<
   addPhase<const Name extends string, Value = unknown>(
     name: Name,
     options: CachedPhaseOptions<In, Ctx, Value>,
-  ): Script<In, Ctx, Reserved, Commit<Slots, Open>, { name: Name; schema: Value; delta: {} }>;
+  ): Script<
+    In,
+    Ctx,
+    Reserved,
+    Commit<Slots, Open>,
+    { name: Name; phase: Name; schema: Value; delta: {} }
+  >;
   /** Open a new phase. Subsequent `addStep` calls land in it. */
-  addPhase(
-    name: string,
+  addPhase<const Name extends string>(
+    name: Name,
     options?: PhaseOptions<In, Ctx>,
-  ): Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase>;
+  ): Script<
+    In,
+    Ctx,
+    Reserved,
+    Commit<Slots, Open>,
+    // Not a slot itself, but its steps' slots are named after it.
+    { name: never; phase: Name; schema: unknown; delta: {} }
+  >;
   /** Open a phase and populate it inside a callback, keeping the type flow. */
   addPhase<
     Next extends object,
@@ -355,6 +381,44 @@ export class Script<
    * @throws {StepDefinitionError} if `clean` names a key reserved by some
    * step's `rollbackKeys`.
    */
+  /**
+   * A step that caches. It contributes its own slot, `phase::step`, holding
+   * exactly what the handler returns — addressable through `context.cache` in
+   * every step declared after it.
+   *
+   * Split from the plain form rather than inferring the presence of `cache`:
+   * an optional property cannot be told apart from its own default, so a
+   * single signature always resolved to "no cache" and quietly dropped the
+   * slot.
+   */
+  addStep<
+    Out extends object | void,
+    const Name extends string,
+    const RollbackKeys extends readonly PropertyKey[] = readonly [],
+    const CleanKeys extends readonly PropertyKey[] = readonly [],
+  >(
+    def: Omit<StepDef<In, Ctx, Out, RollbackKeys, Slots>, "name"> &
+      CleanField<Ctx, Reserved, CleanKeys> & { name: Name; cache: CacheSource<In, Ctx> },
+  ): Script<
+    In,
+    Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
+    Reserved | RollbackKeys[number],
+    Slots & Record<`${Open["phase"]}::${Name}`, Out>,
+    {
+      name: Open["name"];
+      phase: Open["phase"];
+      schema: Open["schema"];
+      delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
+    }
+  >;
+  /**
+   * Append a step to the current phase. Whatever the handler resolves to is
+   * merged into the context and becomes visible to every later step; whatever
+   * it lists in `clean` is dropped from both.
+   *
+   * @throws {StepDefinitionError} if `clean` names a key reserved by some
+   * step's `rollbackKeys`.
+   */
   addStep<
     Out extends object | void,
     const RollbackKeys extends readonly PropertyKey[] = readonly [],
@@ -370,10 +434,12 @@ export class Script<
     // a phase's slot type match what it actually stores.
     {
       name: Open["name"];
+      phase: Open["phase"];
       schema: Open["schema"];
       delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
     }
-  > {
+  >;
+  addStep(def: object): unknown {
     const step = def as unknown as AnyStepDef;
     const rollbackKeys = step.rollbackKeys ?? [];
 
@@ -402,17 +468,7 @@ export class Script<
       );
     }
     phase.steps.push(step);
-    return this as unknown as Script<
-      In,
-      Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
-      Reserved | RollbackKeys[number],
-      Slots,
-      {
-        name: Open["name"];
-        schema: Open["schema"];
-        delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
-      }
-    >;
+    return this;
   }
 
   /**
@@ -1167,7 +1223,7 @@ function abortRejection(signal: AbortSignal): { promise: Promise<never>; dispose
  * `rollbackKeys` works the same here, and the keys it names stay reserved once
  * the step is handed to `addStep`.
  */
-export function stepFor<In, Ctx extends object = {}, Slots = {}>() {
+export function stepFor<In, Ctx extends object = {}, Slots = UnknownSlots>() {
   return <Out extends object | void, const RollbackKeys extends readonly PropertyKey[] = readonly []>(
     def: StepDef<In, Ctx, Out, RollbackKeys, Slots>,
   ): StepDef<In, Ctx, Out, RollbackKeys, Slots> => def;

@@ -59,6 +59,7 @@ export type {
   StepStatus,
   TaskHandle,
   TaskListHandle,
+  UnknownSlots,
   WithStepFor,
 } from "./types.js";
 
