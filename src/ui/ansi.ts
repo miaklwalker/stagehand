@@ -53,6 +53,17 @@ export const cursor = {
   eraseDown: `${ESC}0J`,
 };
 
+/**
+ * DEC private mode 2026 ("synchronized output"). Terminals that honour it
+ * buffer everything between start/end and paint it as one frame, so an
+ * erase-then-redraw pair never shows a blank frame in between. Terminals
+ * that don't recognise the sequence just ignore it — safe everywhere.
+ */
+export const sync = {
+  start: `${ESC}?2026h`,
+  end: `${ESC}?2026l`,
+};
+
 export function stripAnsi(input: string): string {
   return input.replace(ANSI_PATTERN, "");
 }

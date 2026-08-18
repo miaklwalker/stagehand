@@ -1,4 +1,4 @@
-import { cursor } from "./ansi.js";
+import { cursor, sync } from "./ansi.js";
 import { palette, supportsAnimation, symbols } from "./theme.js";
 import { renderBody, renderHeader, renderLogEntry, renderSummary } from "./frame.js";
 import {
@@ -44,6 +44,7 @@ export class LiveRenderer implements Renderer {
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
   private lastPaintAt = 0;
+  private lastFrame: string | null = null;
   private readonly logPlacement: LogPlacement;
 
   constructor(logPlacement: LogPlacement = "scrollback") {
@@ -71,6 +72,7 @@ export class LiveRenderer implements Renderer {
    */
   private readonly onResize = (): void => {
     this.liveLines = 0;
+    this.lastFrame = null;
     this.paint();
   };
 
@@ -98,8 +100,8 @@ export class LiveRenderer implements Renderer {
       return;
     }
 
-    this.clear();
-    this.write(renderLogEntry(entry) + "\n");
+    this.paintFrame(this.eraseSequence() + renderLogEntry(entry) + "\n");
+    this.lastFrame = null;
     this.paint();
   }
 
@@ -123,13 +125,11 @@ export class LiveRenderer implements Renderer {
     this.stream.off("resize", this.onResize);
 
     const now = performance.now();
-    this.clear();
     const final = [
       ...renderBody(this.state, this.tick, now, false),
       ...renderSummary(this.state, now),
     ];
-    this.write(final.join("\n") + "\n");
-    this.liveLines = 0;
+    this.paintFrame(this.eraseSequence() + final.join("\n") + "\n");
     this.stream.write(cursor.show);
   }
 
@@ -142,17 +142,41 @@ export class LiveRenderer implements Renderer {
     // a frame taller than the terminal scrolls its own anchor off screen.
     const maxLines = Math.max(1, (process.stdout.rows ?? 40) - 1);
     const body = renderBody(this.state, this.tick, now).slice(0, maxLines);
+    const frame = body.join("\n");
 
-    this.clear();
-    this.write(body.join("\n") + "\n");
+    if (frame === this.lastFrame) {
+      this.lastPaintAt = now;
+      return;
+    }
+
+    // No trailing newline: the cursor is left on the last content line
+    // rather than advanced past it. A region anchored to the bottom row
+    // that ends with a newline forces the terminal to scroll the whole
+    // buffer on every repaint — `eraseSequence()` accounts for the missing
+    // final line when it works out how far up to move next time.
+    this.paintFrame(this.eraseSequence() + frame + cursor.toStart);
     this.liveLines = body.length;
+    this.lastFrame = frame;
     this.lastPaintAt = now;
   }
 
-  private clear(): void {
-    if (this.liveLines === 0) return;
-    this.stream.write(cursor.up(this.liveLines) + cursor.toStart + cursor.eraseDown);
+  /** Returns the escape sequence to erase the live region, and marks it erased. */
+  private eraseSequence(): string {
+    if (this.liveLines === 0) return "";
+    const upBy = this.liveLines - 1;
+    const seq = (upBy > 0 ? cursor.up(upBy) : "") + cursor.toStart + cursor.eraseDown;
     this.liveLines = 0;
+    return seq;
+  }
+
+  /**
+   * Single write, bookended with the synchronized-output escape so terminals
+   * that honour it (Windows Terminal, recent xterm/VTE/Ghostty/iTerm) paint
+   * the erase and the new content atomically instead of as two frames — the
+   * two-frame version is what reads as flicker/blinking.
+   */
+  private paintFrame(text: string): void {
+    this.stream.write(sync.start + text + sync.end);
   }
 
   private write(text: string): void {
