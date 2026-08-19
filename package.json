@@ -11,7 +11,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "skills",
+    "!skills/_artifacts"
   ],
   "engines": {
     "node": ">=20"
@@ -29,7 +31,8 @@
     "cli",
     "typescript",
     "rollback",
-    "compensation"
+    "compensation",
+    "tanstack-intent"
   ],
   "license": "MIT",
   "repository": {
@@ -37,9 +40,10 @@
     "url": "https://github.com/miaklwalker/stagehand"
   },
   "devDependencies": {
+    "@tanstack/intent": "^0.3.6",
     "@types/node": "^22.10.0",
-    "typescript": "^5.7.0",
-    "release-it": "^20.2.1"
+    "release-it": "^20.2.1",
+    "typescript": "^5.7.0"
   },
   "publishConfig": {
     "access": "public"

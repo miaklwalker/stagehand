@@ -651,6 +651,11 @@ npm run example:fail
 npm run release     # release-it: version, tag, publish
 ```
 
+If you use an AI agent, run `npx @tanstack/intent@latest install` to pull in
+Stagehand's agent skills — task-focused guides covering rollbacks, caching,
+context typing, and the rest of the API, generated from this repo's own docs
+and source.
+
 ## Releasing
 
 [`scripts/preflight.ts`](scripts/preflight.ts) is the gate, and it is written
