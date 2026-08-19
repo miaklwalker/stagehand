@@ -207,6 +207,9 @@ test("a finished phase, once collapsed to fit, stays collapsed even as the activ
       // The running step's task list and the bottom log tail both grow and
       // shrink every other frame — exactly the kind of ephemeral, per-tick
       // content a real run produces without anything actually settling.
+      if(!running ||!running.steps[0]){
+        throw new Error(`running ${frame}`);
+      }
       running.steps[0].tasks =
         frame % 2 === 0
           ? [
@@ -227,7 +230,7 @@ test("a finished phase, once collapsed to fit, stays collapsed even as the activ
 
     for (let i = 1; i < tierPerFrame.length; i += 1) {
       assert.ok(
-        tierPerFrame[i] >= tierPerFrame[i - 1],
+        tierPerFrame[i]! >= tierPerFrame[i - 1]!,
         `tier dropped from ${tierPerFrame[i - 1]} to ${tierPerFrame[i]} at frame ${i}`,
       );
     }
