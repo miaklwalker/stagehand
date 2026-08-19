@@ -56,13 +56,26 @@ export const cursor = {
 /**
  * DEC private mode 2026 ("synchronized output"). Terminals that honour it
  * buffer everything between start/end and paint it as one frame, so an
- * erase-then-redraw pair never shows a blank frame in between. Terminals
- * that don't recognise the sequence just ignore it — safe everywhere.
+ * erase-then-redraw pair never shows a blank frame in between.
  */
 export const sync = {
   start: `${ESC}?2026h`,
   end: `${ESC}?2026l`,
 };
+
+/**
+ * Windows Terminal's DirectX renderer presents writes eagerly enough that an
+ * erase and a redraw can each land as a visible frame — that's what `sync`
+ * exists to fix. Most other terminals coalesce writes on their own and don't
+ * need the hint, and at least one (WebStorm's JediTerm) appears to mishandle
+ * the unrecognised `CSI ? 2026` sequence rather than the usual "ignore
+ * unknown private mode" behaviour, stalling the live region until something
+ * else forces a redraw. So keep this opt-in to the one terminal it's for,
+ * rather than sending it everywhere and hoping every parser ignores it.
+ */
+export function supportsSyncOutput(): boolean {
+  return Boolean(process.env.WT_SESSION);
+}
 
 export function stripAnsi(input: string): string {
   return input.replace(ANSI_PATTERN, "");

@@ -278,15 +278,37 @@ export function bodyBudget(): number {
   return Math.max(6, (process.stdout.rows ?? 40) - 3);
 }
 
+/** How hard `renderBody` has had to squeeze to fit — 1 is the least compressed. */
+export type BodyTier = 1 | 2 | 3 | 4;
+
 /**
- * The live body, guaranteed to fit `bodyBudget()`.
+ * The live body, guaranteed to fit `bodyBudget()`, plus the tier it took to
+ * get there.
  *
  * This guarantee is load-bearing, not cosmetic: the renderer repaints by moving
  * the cursor up N lines, so a frame taller than the viewport scrolls its own
  * top off screen and every repaint appends a copy instead of overwriting. Four
  * progressively stronger reductions are tried, and the result is clamped.
+ *
+ * `minTier` exists so a caller that repaints repeatedly can pin the tier once
+ * it has had to compress: an active step's own detail (its progress bar, its
+ * task list) and a `"bottom"`-placed log tail both change height every tick on
+ * their own, with nothing about *other*, already-finished phases changing at
+ * all. Re-deciding "does everything fit?" from scratch on every frame means
+ * that harmless wobble alone repeatedly drags the whole body across the fit
+ * threshold — every finished phase flips between full and one-line collapsed
+ * along with it, which reads as the frame randomly changing its mind rather
+ * than reacting to anything the user did. Once a tier has been needed, holding
+ * it keeps already-settled phases settled even while the active step's own
+ * footprint keeps moving.
  */
-export function renderBody(state: RunState, tick: number, now: number, fit = true): string[] {
+export function renderBodyTiered(
+  state: RunState,
+  tick: number,
+  now: number,
+  fit = true,
+  minTier: BodyTier = 1,
+): { lines: string[]; tier: BodyTier } {
   const budget = bodyBudget();
   const tail = renderLogTail(state.logTail);
 
@@ -301,36 +323,53 @@ export function renderBody(state: RunState, tick: number, now: number, fit = tru
 
   // The closing frame is written permanently and never repainted, so it may
   // scroll freely — keep every step visible there.
-  if (!fit) return [...build(() => "full"), ...tail];
+  if (!fit) return { lines: [...build(() => "full"), ...tail], tier: 1 };
 
   const done = (phase: PhaseState): boolean => {
     const status = phaseStatus(phase);
-    return status === "success" || status === "skipped";
+    return status === "success" || status === "skipped" || status === "cached";
   };
   const active = (phase: PhaseState): boolean => phaseStatus(phase) === "running";
 
   // 1. Everything, in full.
-  let out = build(() => "full");
-  if (out.length + tail.length <= budget) return [...out, ...tail];
+  if (minTier <= 1) {
+    const out = build(() => "full");
+    if (out.length + tail.length <= budget) return { lines: [...out, ...tail], tier: 1 };
+  }
 
   // 2. Finished phases become one line each.
-  out = build((phase) => (done(phase) ? "collapsed" : "full"));
-  if (out.length + tail.length <= budget) return [...out, ...tail];
+  if (minTier <= 2) {
+    const out = build((phase) => (done(phase) ? "collapsed" : "full"));
+    if (out.length + tail.length <= budget) return { lines: [...out, ...tail], tier: 2 };
+  }
 
   // 3. Only the running phase keeps its steps, and drops its detail lines.
-  out = build((phase) => (active(phase) ? "compact" : "collapsed"));
-  if (out.length + tail.length <= budget) return [...out, ...tail];
+  if (minTier <= 3) {
+    const out = build((phase) => (active(phase) ? "compact" : "collapsed"));
+    if (out.length + tail.length <= budget) return { lines: [...out, ...tail], tier: 3 };
+  }
 
   // 4. Window the running phase's steps around the one actually executing.
   const overhead = state.phases.filter((phase) => !active(phase)).length * 2;
-  out = build(
+  const out = build(
     (phase) => (active(phase) ? "compact" : "collapsed"),
     Math.max(1, budget - overhead - 2 - tail.length),
   );
   const combined = [...out, ...tail];
 
   // Last resort: a phase with a huge task list, or a viewport of a few rows.
-  return combined.length <= budget ? combined : combined.slice(0, budget);
+  return { lines: combined.length <= budget ? combined : combined.slice(0, budget), tier: 4 };
+}
+
+/** Convenience wrapper over {@link renderBodyTiered} for callers that just want the lines. */
+export function renderBody(
+  state: RunState,
+  tick: number,
+  now: number,
+  fit = true,
+  minTier: BodyTier = 1,
+): string[] {
+  return renderBodyTiered(state, tick, now, fit, minTier).lines;
 }
 
 export function renderSummary(state: RunState, now: number): string[] {

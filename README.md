@@ -612,11 +612,12 @@ fragment someone else's script also mounts.
 
 ## Examples
 
-Ten runnable scripts, each aimed at a different part of the API. Most take a
-flag to switch between the happy path and the interesting one.
+Eleven runnable scripts, each aimed at a different part of the API. Most take
+a flag to switch between the happy path and the interesting one.
 
 | | |
 | --- | --- |
+| [`kitchen-sink.ts`](examples/kitchen-sink.ts) | Every rendering feature in one run — retry backoff, a cached phase and a cached step, every task and log state, a step-level and a phase-level `when()` skip, and a full rollback. Long-running (~25–30s) on purpose, for watching the live frame or comparing terminal apps side by side. `-- --fail`, `-- --production`, `-- --fresh` |
 | [`deploy.ts`](examples/deploy.ts) | The tour: phases, progress bars, checklists, retry, `note`, `clean`, rollback. `npm run example`, `npm run example:fail` |
 | [`checkout.ts`](examples/checkout.ts) | Saga semantics end to end — three mutations, three compensations, a secret dropped with `clean`, and `logPlacement: "step"` nesting each rollback's log under the step it undoes. `-- --ok` for the happy path |
 | [`resilience.ts`](examples/resilience.ts) | `retry` with backoff, `retryIf` refusing to retry a 401, `timeoutMs` on a hung step, and an external `AbortSignal`. `-- --timeout`, `-- --fatal`, `-- --cancel` |

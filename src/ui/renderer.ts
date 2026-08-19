@@ -1,6 +1,6 @@
-import { cursor, sync } from "./ansi.js";
+import { cursor, sync, supportsSyncOutput } from "./ansi.js";
 import { palette, supportsAnimation, symbols } from "./theme.js";
-import { renderBody, renderHeader, renderLogEntry, renderSummary } from "./frame.js";
+import { renderBodyTiered, renderHeader, renderLogEntry, renderSummary, type BodyTier } from "./frame.js";
 import {
   elapsed,
   errorMessage,
@@ -45,6 +45,8 @@ export class LiveRenderer implements Renderer {
   private stopped = false;
   private lastPaintAt = 0;
   private lastFrame: string | null = null;
+  /** Never lowered mid-run — see {@link renderBodyTiered} for why. */
+  private tier: BodyTier = 1;
   private readonly logPlacement: LogPlacement;
 
   constructor(logPlacement: LogPlacement = "scrollback") {
@@ -54,6 +56,7 @@ export class LiveRenderer implements Renderer {
   start(state: RunState): void {
     this.state = state;
     this.stopped = false;
+    this.tier = 1;
     this.write(renderHeader(state).join("\n") + "\n");
     this.stream.write(cursor.hide);
     this.stream.on("resize", this.onResize);
@@ -73,6 +76,9 @@ export class LiveRenderer implements Renderer {
   private readonly onResize = (): void => {
     this.liveLines = 0;
     this.lastFrame = null;
+    // The viewport itself changed, so the tier this run had settled into may
+    // no longer be the right one either way — give it a fresh decision.
+    this.tier = 1;
     this.paint();
   };
 
@@ -126,7 +132,7 @@ export class LiveRenderer implements Renderer {
 
     const now = performance.now();
     const final = [
-      ...renderBody(this.state, this.tick, now, false),
+      ...renderBodyTiered(this.state, this.tick, now, false).lines,
       ...renderSummary(this.state, now),
     ];
     this.paintFrame(this.eraseSequence() + final.join("\n") + "\n");
@@ -141,7 +147,9 @@ export class LiveRenderer implements Renderer {
     // backstop that keeps the up-N-lines invariant true no matter what, since
     // a frame taller than the terminal scrolls its own anchor off screen.
     const maxLines = Math.max(1, (process.stdout.rows ?? 40) - 1);
-    const body = renderBody(this.state, this.tick, now).slice(0, maxLines);
+    const rendered = renderBodyTiered(this.state, this.tick, now, true, this.tier);
+    this.tier = rendered.tier;
+    const body = rendered.lines.slice(0, maxLines);
     const frame = body.join("\n");
 
     if (frame === this.lastFrame) {
@@ -170,13 +178,13 @@ export class LiveRenderer implements Renderer {
   }
 
   /**
-   * Single write, bookended with the synchronized-output escape so terminals
-   * that honour it (Windows Terminal, recent xterm/VTE/Ghostty/iTerm) paint
-   * the erase and the new content atomically instead of as two frames — the
-   * two-frame version is what reads as flicker/blinking.
+   * Single write so the erase and the new content always land together.
+   * On Windows Terminal that alone can still leave a gap the DirectX
+   * renderer presents as a blank frame, so it additionally gets the
+   * synchronized-output bookend — see `supportsSyncOutput()`.
    */
   private paintFrame(text: string): void {
-    this.stream.write(sync.start + text + sync.end);
+    this.stream.write(supportsSyncOutput() ? sync.start + text + sync.end : text);
   }
 
   private write(text: string): void {

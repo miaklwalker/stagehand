@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bodyBudget, renderBody } from "../dist/ui/frame.js";
+import { bodyBudget, renderBody, renderBodyTiered, type BodyTier } from "../dist/ui/frame.js";
 import type { PhaseState, RunState, StepState } from "../dist/state.js";
 
 function withRows<T>(rows: number, fn: () => T): T {
@@ -162,6 +162,82 @@ test("the closing frame keeps full detail and ignores the budget", () => {
           closing.some((line) => line.includes(step.name)),
           `${step.name} missing from the closing frame`,
         );
+      }
+    }
+  });
+});
+
+/**
+ * A running step's own detail (its task list, a `"bottom"`-placed log tail)
+ * changes height on its own, tick to tick, with nothing about a separate,
+ * already-finished phase changing at all. Re-deciding "does everything fit?"
+ * from scratch on every call means that wobble alone can drag the whole body
+ * across the fit threshold and flip an unrelated finished phase between full
+ * and collapsed — reads as the frame randomly changing its mind. Threading
+ * the tier forward and never lowering it is what prevents that.
+ */
+test("a finished phase, once collapsed to fit, stays collapsed even as the active step's own detail wobbles", () => {
+  const finished: PhaseState = {
+    name: "Fetch",
+    steps: [
+      makeStep("download manifest", "cached"),
+      makeStep("verify checksum", "cached"),
+    ],
+  };
+  const running: PhaseState = {
+    name: "Build",
+    steps: [makeStep("compile", "running", { startedAt: 0, tasks: [] })],
+  };
+  const state: RunState = {
+    name: "release",
+    status: "running",
+    startedAt: 0,
+    rollbackCount: 0,
+    rollbackFailures: 0,
+    logTail: [],
+    phases: [finished, running],
+  };
+
+  withRows(14, () => {
+    let tier: BodyTier = 1;
+    const collapsedPerFrame: boolean[] = [];
+    const tierPerFrame: BodyTier[] = [];
+
+    for (let frame = 0; frame < 12; frame += 1) {
+      // The running step's task list and the bottom log tail both grow and
+      // shrink every other frame — exactly the kind of ephemeral, per-tick
+      // content a real run produces without anything actually settling.
+      running.steps[0].tasks =
+        frame % 2 === 0
+          ? [
+              { label: "typecheck", status: "running" },
+              { label: "transform", status: "running" },
+              { label: "minify", status: "running" },
+            ]
+          : [];
+      state.logTail = frame % 3 === 0 ? [{ level: "info", message: "x".repeat(20) }] : [];
+
+      const rendered = renderBodyTiered(state, frame, frame * 100, true, tier);
+      tier = rendered.tier;
+      tierPerFrame.push(tier);
+
+      const fetchLine = rendered.lines.find((line) => line.includes("Fetch"));
+      collapsedPerFrame.push(Boolean(fetchLine?.includes("steps")));
+    }
+
+    for (let i = 1; i < tierPerFrame.length; i += 1) {
+      assert.ok(
+        tierPerFrame[i] >= tierPerFrame[i - 1],
+        `tier dropped from ${tierPerFrame[i - 1]} to ${tierPerFrame[i]} at frame ${i}`,
+      );
+    }
+
+    // Fetch is finished before frame 0, so once it renders collapsed even
+    // once, it must render collapsed on every later frame — never flip back.
+    const firstCollapsedAt = collapsedPerFrame.indexOf(true);
+    if (firstCollapsedAt !== -1) {
+      for (let i = firstCollapsedAt; i < collapsedPerFrame.length; i += 1) {
+        assert.ok(collapsedPerFrame[i], `Fetch un-collapsed again at frame ${i}`);
       }
     }
   });

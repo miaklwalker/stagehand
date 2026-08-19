@@ -6,4 +6,5 @@ dist/
 .idea
 
 .stagehand-cache.json
+.stagehand-cache-kitchen-sink.json
 .stagehand-invalidate.json
