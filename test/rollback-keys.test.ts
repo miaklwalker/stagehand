@@ -189,6 +189,50 @@ test("rollbackKeys only accepts keys of the step's context or output", () => {
   assert.ok(true);
 });
 
+test("an async step that returns nothing can roll back an earlier step's key", async () => {
+  let seen: unknown;
+  let read: unknown;
+
+  const script = new Script({ name: "t", ...quiet })
+    .addStep({
+      name: "build results",
+      handler: async () => ({ results: [{ name: "fancy!" }] }),
+    })
+    .addStep({
+      name: "use results",
+      rollbackKeys: ["results"],
+      rollback: async ({ ctx }) => {
+        type _narrowed = Expect<Equal<typeof ctx, { results: { name: string }[] }>>;
+        assert.ok(true as _narrowed);
+        seen = { ...ctx };
+      },
+      // Returns nothing *and* reads a key an earlier step produced. `Out` used
+      // to be inferred from `rollbackKeys` here — as `{ results: any }` — and
+      // collide with the handler's own `Promise<void>`.
+      handler: async ({ ctx }) => {
+        type _ctx = Expect<Equal<typeof ctx, { results: { name: string }[] }>>;
+        assert.ok(true as _ctx);
+        read = ctx.results.map((entry) => entry.name);
+      },
+    })
+    // The step contributed nothing, so a later step sees exactly what came
+    // before it — not `{ results: any }`, and not a context missing `results`.
+    .addStep({
+      name: "later",
+      handler: ({ ctx }) => {
+        type _flowed = Expect<Equal<typeof ctx, { results: { name: string }[] }>>;
+        assert.ok(true as _flowed);
+      },
+    })
+    .addStep(boom);
+
+  const result = await script.run();
+
+  assert.ok(!result.ok);
+  assert.deepEqual(read, ["fancy!"]);
+  assert.deepEqual(seen, { results: [{ name: "fancy!" }] });
+});
+
 test("stepFor carries rollbackKeys, and the reservation survives addStep", () => {
   const makeResource = stepFor<{ userId: string }, { userId: string }>()({
     name: "make resource",

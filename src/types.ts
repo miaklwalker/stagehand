@@ -405,6 +405,71 @@ export interface StepDef<
 }
 
 /**
+ * The same step definition as {@link StepDef}, for the case where every
+ * `rollbackKeys` entry names a key the incoming context *already* has —
+ * something an earlier step produced, not something this one returns.
+ *
+ * The only difference is that `rollbackKeys` is plain `RollbackKeys` here
+ * rather than `RollbackKeys & readonly (keyof Merge<Ctx, Out>)[]`, and that is
+ * the whole fix. In `StepDef`, `Out` is inferred from three sibling properties
+ * of one object literal at once — and `handler`, the only one that knows the
+ * answer, is inferred *last*, because a handler with a destructured parameter
+ * is context-sensitive and so deferred to inference's second pass. Whichever
+ * of `rollbackKeys` and `rollback` TypeScript reaches first settles `Out` on
+ * its own: `rollbackKeys: ["k"]` reverse-infers `{ k: any }` out of
+ * `keyof Merge<Ctx, Out>`, and `rollback` feeds back whatever provisional
+ * `Out` it happened to be contextually typed with. Either candidate then
+ * collides with a handler resolving `Promise<void>`, which is the
+ * `TS2769: No overload matches this call` on a step that returns nothing while
+ * naming a key an earlier step produced.
+ *
+ * Dropping `Out` from `rollbackKeys` leaves `handler` as its only inference
+ * site. `rollbackKeys` stays checked — against `keyof Ctx`, through the
+ * *constraint* on `addStep`'s `RollbackKeys` parameter, which is concrete and
+ * so cannot drag `Out` anywhere. A step naming one of its own output keys
+ * fails that constraint on the spot, in inference's first pass and before any
+ * context-sensitive property is typed, and falls through to the `StepDef`
+ * overload with nothing left behind.
+ *
+ * `Out` defaults to `void` rather than falling back to its constraint, which
+ * is what a `rollback` declared *above* its own `handler` resolves it to while
+ * the handler is still pending — the right answer for a step that returns
+ * nothing, and harmlessly replaced by the handler's own candidate otherwise.
+ */
+export interface InheritedKeyStepDef<
+  In,
+  Ctx,
+  Out,
+  RollbackKeys extends readonly PropertyKey[] = readonly [],
+  Slots = UnknownSlots,
+> {
+  name: string;
+  description?: string;
+  /** See {@link StepDef.handler}. */
+  handler: (context: StepContext<In, Ctx, Slots>) => Awaitable<Out>;
+  /**
+   * The context keys this step's `rollback` needs, all of them inherited from
+   * an earlier step. Checked against `keyof Ctx` by `addStep`'s constraint.
+   */
+  rollbackKeys?: RollbackKeys;
+  /** See {@link StepDef.rollback}. */
+  rollback?: (
+    context: RollbackContext<
+      In,
+      Prettify<RollbackData<Merge<Ctx, Out>, RollbackKeys>>,
+      Out,
+      Slots
+    >,
+  ) => Awaitable<void>;
+  /** See {@link StepDef.when}. */
+  when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
+  /** See {@link StepDef.cache}. */
+  cache?: CacheSource<In, Ctx>;
+  retry?: RetryPolicy;
+  timeoutMs?: number;
+}
+
+/**
  * The context a later step sees, given a step that ran before it and whatever
  * else is already there. Spares you from restating a step's return shape by
  * hand just to declare the next step's `Ctx`.

@@ -55,6 +55,7 @@ export type {
   StaleContext,
   StepContext,
   StepDef,
+  InheritedKeyStepDef,
   StepReport,
   StepStatus,
   TaskHandle,

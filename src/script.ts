@@ -35,6 +35,7 @@ import type {
   StepDef,
   UnknownSlots,
   StepReport,
+  InheritedKeyStepDef,
 } from "./types.js";
 import { createRenderer, type Renderer } from "./ui/renderer.js";
 
@@ -378,19 +379,67 @@ export class Script<
    * merged into the context and becomes visible to every later step; whatever
    * it lists in `clean` is dropped from both.
    *
+   * There are four signatures, along two independent splits.
+   *
+   * A step that caches contributes its own slot, `phase::step`, holding
+   * exactly what the handler returns — addressable through `context.cache` in
+   * every step declared after it. That is split from the plain form rather
+   * than inferred from the presence of `cache`: an optional property cannot be
+   * told apart from its own default, so a single signature always resolved to
+   * "no cache" and quietly dropped the slot.
+   *
+   * Crossed with that, each form is tried first as an
+   * {@link InheritedKeyStepDef} — `rollbackKeys` naming only keys the context
+   * already has — which is what keeps the handler as the sole inference site
+   * for `Out`. A step naming one of its own output keys fails that signature's
+   * `RollbackKeys` constraint in inference's first pass and falls through to
+   * the general {@link StepDef} form below.
+   *
    * @throws {StepDefinitionError} if `clean` names a key reserved by some
    * step's `rollbackKeys`.
    */
-  /**
-   * A step that caches. It contributes its own slot, `phase::step`, holding
-   * exactly what the handler returns — addressable through `context.cache` in
-   * every step declared after it.
-   *
-   * Split from the plain form rather than inferring the presence of `cache`:
-   * an optional property cannot be told apart from its own default, so a
-   * single signature always resolved to "no cache" and quietly dropped the
-   * slot.
-   */
+  /** Cached, `rollbackKeys` inherited. See {@link InheritedKeyStepDef}. */
+  addStep<
+    Out extends object | void = void,
+    const Name extends string = string,
+    const RollbackKeys extends readonly (keyof Ctx)[] = readonly [],
+    const CleanKeys extends readonly PropertyKey[] = readonly [],
+  >(
+    def: Omit<InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots>, "name"> &
+      CleanField<Ctx, Reserved, CleanKeys> & { name: Name; cache: CacheSource<In, Ctx> },
+  ): Script<
+    In,
+    Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
+    Reserved | RollbackKeys[number],
+    Slots & Record<`${Open["phase"]}::${Name}`, Out>,
+    {
+      name: Open["name"];
+      phase: Open["phase"];
+      schema: Open["schema"];
+      delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
+    }
+  >;
+  /** Plain, `rollbackKeys` inherited. See {@link InheritedKeyStepDef}. */
+  addStep<
+    Out extends object | void = void,
+    const RollbackKeys extends readonly (keyof Ctx)[] = readonly [],
+    const CleanKeys extends readonly PropertyKey[] = readonly [],
+  >(
+    def: InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots> &
+      CleanField<Ctx, Reserved, CleanKeys>,
+  ): Script<
+    In,
+    Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
+    Reserved | RollbackKeys[number],
+    Slots,
+    {
+      name: Open["name"];
+      phase: Open["phase"];
+      schema: Open["schema"];
+      delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
+    }
+  >;
+  /** Cached, general form. See {@link StepDef}. */
   addStep<
     Out extends object | void,
     const Name extends string,
@@ -411,14 +460,7 @@ export class Script<
       delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
     }
   >;
-  /**
-   * Append a step to the current phase. Whatever the handler resolves to is
-   * merged into the context and becomes visible to every later step; whatever
-   * it lists in `clean` is dropped from both.
-   *
-   * @throws {StepDefinitionError} if `clean` names a key reserved by some
-   * step's `rollbackKeys`.
-   */
+  /** Plain, general form. See {@link StepDef}. */
   addStep<
     Out extends object | void,
     const RollbackKeys extends readonly PropertyKey[] = readonly [],
@@ -1224,9 +1266,27 @@ function abortRejection(signal: AbortSignal): { promise: Promise<never>; dispose
  * the step is handed to `addStep`.
  */
 export function stepFor<In, Ctx extends object = {}, Slots = UnknownSlots>() {
-  return <Out extends object | void, const RollbackKeys extends readonly PropertyKey[] = readonly []>(
+  /**
+   * Split in two for the same reason `addStep` is: the first form keeps `Out`
+   * off `rollbackKeys` so the handler is its only inference site. See
+   * {@link InheritedKeyStepDef}.
+   */
+  function define<
+    Out extends object | void = void,
+    const RollbackKeys extends readonly (keyof Ctx)[] = readonly [],
+  >(
+    def: InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots>,
+  ): StepDef<In, Ctx, Out, RollbackKeys, Slots>;
+  function define<
+    Out extends object | void,
+    const RollbackKeys extends readonly PropertyKey[] = readonly [],
+  >(
     def: StepDef<In, Ctx, Out, RollbackKeys, Slots>,
-  ): StepDef<In, Ctx, Out, RollbackKeys, Slots> => def;
+  ): StepDef<In, Ctx, Out, RollbackKeys, Slots>;
+  function define(def: object): object {
+    return def;
+  }
+  return define;
 }
 
 /**

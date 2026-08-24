@@ -52,3 +52,4 @@ const myScript = new Script<{ name: string}>({
         }
     })
 
+myScript.outline()

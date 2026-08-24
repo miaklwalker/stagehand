@@ -1,11 +1,4 @@
 /**
- * One long-running script that touches nearly every rendering feature at
- * once — phases, retry with backoff, progress bars, single and grouped
- * tasks, every log level, `note`/`status`, `clean`, phase- and step-level
- * caching, a step-level `when()` skip, a phase-level `when()` skip, and a
- * full saga rollback. Meant for watching the live frame for a while — the
- * happy path runs about 25–30s — and for comparing that against different
- * terminal apps.
  *
  *   node --experimental-strip-types examples/kitchen-sink.ts
  *   node --experimental-strip-types examples/kitchen-sink.ts -- --fail        smoke test fails, watch Deploy unwind
@@ -130,7 +123,6 @@ const release = new Script<Input>({
   })
   .addStep({
     name: "compile bundle",
-    // Done with the package count now that install is behind us.
     clean: ["packages"],
     handler: async ({ tasks, status }) => {
       const list = tasks(["typecheck", "transform", "minify", "sourcemaps"]);
@@ -260,8 +252,6 @@ const release = new Script<Input>({
 
   .addPhase("Publish", {
     description: "Only for a production release",
-    // Skipped entirely on staging — the whole phase greys out. Pass
-    // --production to watch it run instead.
     when: ({ input }) => input.environment === "production",
   })
   .addStep({
