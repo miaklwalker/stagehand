@@ -181,6 +181,42 @@ export type SlotValue<Schema, Delta> = unknown extends Schema ? Delta : Schema;
 export type UnknownSlots = Record<string, unknown>;
 
 /**
+ * Stand-in for a step that cannot know the host's declared flags — same
+ * reasoning as {@link UnknownSlots}: `Record<string, unknown>` accepts any
+ * key, which is what lets a `stepFor` step read `context.flags` without
+ * knowing the specific script it will end up in.
+ */
+export type UnknownFlags = Record<string, unknown>;
+
+/* -------------------------------------------------------------------------- */
+/* Flags                                                                       */
+/* -------------------------------------------------------------------------- */
+
+export interface BaseFlagOptions<Name extends string = string> {
+  /** The property key on `context.flags`, and (kebab-cased) the default `--` form. */
+  name: Name;
+  /** Override the long `--` flag when it should differ from `name`. */
+  long?: string;
+  /** A single-letter `-` alias. */
+  short?: string;
+  description?: string;
+}
+
+export interface BooleanFlagOptions<Name extends string = string> extends BaseFlagOptions<Name> {
+  boolean: true;
+  /** What the flag resolves to when absent from argv. Default `false`. */
+  default?: boolean;
+}
+
+export interface StringFlagOptions<
+  Name extends string = string,
+  Default extends string | undefined = undefined,
+> extends BaseFlagOptions<Name> {
+  boolean?: false;
+  default?: Default;
+}
+
+/**
  * `context.cache`, typed to the slots declared *before* this step.
  *
  * Invalidation flows backwards — a later step throwing away an earlier phase's
@@ -265,8 +301,66 @@ export interface TaskListHandle<K extends string> {
   get(key: K): TaskHandle;
 }
 
+export interface TextPromptOptions {
+  message: string;
+  /** Used verbatim when stdin isn't interactive, and preselects the field when it is. */
+  default?: string;
+  placeholder?: string;
+  /** Return `true` to accept the value, or a message to show and keep prompting. */
+  validate?: (value: string) => Awaitable<string | true>;
+  /** Render input as `•` — for a value sensitive enough that it shouldn't be echoed. */
+  mask?: boolean;
+}
+
+export interface ConfirmPromptOptions {
+  message: string;
+  default?: boolean;
+}
+
+export interface PromptChoice<Value> {
+  label: string;
+  value: Value;
+  hint?: string;
+}
+
+export interface SelectPromptOptions<Value> {
+  message: string;
+  choices: readonly PromptChoice<Value>[];
+  default?: Value;
+}
+
+export interface MultiSelectPromptOptions<Value> {
+  message: string;
+  choices: readonly PromptChoice<Value>[];
+  default?: readonly Value[];
+  /** Keep prompting until at least this many are selected. */
+  min?: number;
+  /** Keep prompting if more than this many are selected. */
+  max?: number;
+}
+
+/**
+ * Ask the person running the script something, mid-step. Every method
+ * suspends the live frame, reads from stdin, and repaints once it has an
+ * answer.
+ *
+ * On a non-interactive stdin (CI, a pipe, a subprocess) nothing is drawn:
+ * `default` is returned immediately, and a call with no `default` throws
+ * {@link PromptUnavailableError} rather than hanging on a stream nothing will
+ * ever write to.
+ *
+ * Ctrl-C while a prompt is open throws {@link PromptCancelledError}, which
+ * `isAbort` recognizes — the run unwinds exactly as it would for a SIGINT.
+ */
+export interface PromptHandle {
+  text(options: TextPromptOptions): Promise<string>;
+  confirm(options: ConfirmPromptOptions): Promise<boolean>;
+  select<Value>(options: SelectPromptOptions<Value>): Promise<Value>;
+  multiselect<Value>(options: MultiSelectPromptOptions<Value>): Promise<Value[]>;
+}
+
 /** Everything a handler gets: accumulated data plus the live terminal. */
-export interface StepContext<In, Ctx, Slots = UnknownSlots> {
+export interface StepContext<In, Ctx, Slots = UnknownSlots, Flags = UnknownFlags> {
   /** The input the script was run with. */
   readonly input: In;
   /** Data produced by every step that has already succeeded. */
@@ -310,9 +404,22 @@ export interface StepContext<In, Ctx, Slots = UnknownSlots> {
    * this script. See {@link CacheHandle}.
    */
   readonly cache: CacheHandle<Slots>;
+
+  /**
+   * Ask the person running the script something, mid-step — free text,
+   * yes/no, a single choice, or several. See {@link PromptHandle}.
+   */
+  readonly prompt: PromptHandle;
+
+  /**
+   * Values parsed off the command line for every `defineFlag` this script
+   * declared, keyed by each flag's `name`. Parsed once, before any phase
+   * executes; see {@link BooleanFlagOptions} / {@link StringFlagOptions}.
+   */
+  readonly flags: Flags;
 }
 
-export interface RollbackContext<In, Ctx, Out, Slots = UnknownSlots> {
+export interface RollbackContext<In, Ctx, Out, Slots = UnknownSlots, Flags = UnknownFlags> {
   readonly input: In;
   /**
    * Only the keys this step declared in `rollbackKeys`, as they stood when the
@@ -336,6 +443,9 @@ export interface RollbackContext<In, Ctx, Out, Slots = UnknownSlots> {
 
   /** Undoing work usually means the entry describing it is wrong too. */
   readonly cache: CacheHandle<Slots>;
+
+  /** Same as on a handler's context — see {@link StepContext.flags}. */
+  readonly flags: Flags;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -356,6 +466,7 @@ export interface StepDef<
   Out,
   RollbackKeys extends readonly PropertyKey[] = readonly [],
   Slots = UnknownSlots,
+  Flags = UnknownFlags,
 > {
   name: string;
   description?: string;
@@ -363,7 +474,7 @@ export interface StepDef<
    * The work. Whatever object it resolves to is merged into `ctx` and becomes
    * visible — and typed — for every later step.
    */
-  handler: (context: StepContext<In, Ctx, Slots>) => Awaitable<Out>;
+  handler: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<Out>;
   /**
    * The context keys this step's `rollback` needs. It receives only these
    * (none by default), and declaring them reserves them: neither this step nor
@@ -383,7 +494,8 @@ export interface StepDef<
       In,
       Prettify<RollbackData<Merge<Ctx, Out>, RollbackKeys>>,
       Out,
-      Slots
+      Slots,
+      Flags
     >,
   ) => Awaitable<void>;
   /** Skip the step (and its rollback) when this resolves falsy. */
@@ -442,11 +554,12 @@ export interface InheritedKeyStepDef<
   Out,
   RollbackKeys extends readonly PropertyKey[] = readonly [],
   Slots = UnknownSlots,
+  Flags = UnknownFlags,
 > {
   name: string;
   description?: string;
   /** See {@link StepDef.handler}. */
-  handler: (context: StepContext<In, Ctx, Slots>) => Awaitable<Out>;
+  handler: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<Out>;
   /**
    * The context keys this step's `rollback` needs, all of them inherited from
    * an earlier step. Checked against `keyof Ctx` by `addStep`'s constraint.
@@ -458,7 +571,8 @@ export interface InheritedKeyStepDef<
       In,
       Prettify<RollbackData<Merge<Ctx, Out>, RollbackKeys>>,
       Out,
-      Slots
+      Slots,
+      Flags
     >,
   ) => Awaitable<void>;
   /** See {@link StepDef.when}. */

@@ -21,6 +21,10 @@ export interface Renderer {
   onPhaseStart(phase: PhaseState): void;
   onStepStart(step: StepState): void;
   onStepEnd(step: StepState): void;
+  /** Stop repainting and free the live region so a prompt can draw in its place. */
+  suspend(): void;
+  /** Undo {@link suspend} — resume repainting from a clean slate. */
+  resume(): void;
   stop(): void;
 }
 
@@ -121,6 +125,28 @@ export class LiveRenderer implements Renderer {
 
   onStepEnd(): void {
     /* covered by repaint */
+  }
+
+  /** Erases the live region and stops the frame timer so a prompt owns the terminal. */
+  suspend(): void {
+    if (this.stopped || !this.state || !this.timer) return;
+    clearInterval(this.timer);
+    this.timer = null;
+    this.paintFrame(this.eraseSequence());
+    this.stream.write(cursor.show);
+  }
+
+  /** Restarts the frame timer and repaints from scratch below whatever a prompt left behind. */
+  resume(): void {
+    if (this.stopped || !this.state || this.timer) return;
+    this.stream.write(cursor.hide);
+    this.lastFrame = null;
+    this.timer = setInterval(() => {
+      this.tick += 1;
+      this.paint();
+    }, FRAME_INTERVAL_MS);
+    this.timer.unref?.();
+    this.paint();
   }
 
   stop(): void {
@@ -239,6 +265,14 @@ export class PlainRenderer implements Renderer {
     this.stream.write(`  ${icon} ${step.name}${note}${cached}${time}${suffix}\n`);
   }
 
+  suspend(): void {
+    /* nothing live to give up */
+  }
+
+  resume(): void {
+    /* nothing live to reclaim */
+  }
+
   stop(): void {
     /* summary printed by the caller via printSummary */
   }
@@ -266,6 +300,8 @@ export class SilentRenderer implements Renderer {
   onPhaseStart(): void {}
   onStepStart(): void {}
   onStepEnd(): void {}
+  suspend(): void {}
+  resume(): void {}
   stop(): void {}
 }
 

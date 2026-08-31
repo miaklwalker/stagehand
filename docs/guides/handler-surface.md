@@ -21,6 +21,8 @@ it gets.
 | `task(label)` | one nested checklist item |
 | `tasks([...] as const)` | a whole checklist, keyed for typed lookup |
 | `cache` | read/write/clear cached phases declared earlier; see [Caching](../guides/caching) |
+| `prompt` | ask for free text, yes/no, a single choice, or several; see [Prompts](../guides/prompts) |
+| `flags` | values parsed off the command line for every `defineFlag`; see [Flags](../guides/flags) |
 
 ## `status` vs `note`
 

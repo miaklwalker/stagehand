@@ -3,12 +3,12 @@ title: "Script"
 description: "The Script class API: constructor, defineInput, addPhase, addStep, use, outline, run, plus script(), stepFor, and routineFor."
 ---
 
-`Script<In, Ctx, Reserved, Slots, Open>` is the builder every script starts
-from. Only the first two type parameters are ever written by hand (`In` as
+`Script<In, Ctx, Reserved, Slots, Open, Flags>` is the builder every script
+starts from. Only the first type parameter is ever written by hand (`In` as
 `new Script<Input>(...)`, or inferred via `defineInput`); the rest are inferred
-automatically as `addStep`, `addPhase`, and `use` are chained. Full narrative
-coverage of each method lives in the guides linked below — this page is the
-flat signature reference.
+automatically as `addStep`, `addPhase`, `use`, and `defineFlag` are chained.
+Full narrative coverage of each method lives in the guides linked below — this
+page is the flat signature reference.
 
 ## `new Script(options?)`
 
@@ -44,6 +44,38 @@ before any phase executes, throwing `SchemaValidationError` on failure. Call it
 first, immediately after construction: any `addStep`/`addPhase` called before it
 still sees the previous `In`. See
 [The Typed Context](../guides/typed-context#validating-input-with-defineinput).
+
+## `.defineFlag(options)`
+
+```ts
+defineFlag<const Name extends string>(
+  options: BooleanFlagOptions<Name>,
+): Script<In, Ctx, Reserved, Slots, Open, Flags & Record<Name, boolean>>
+
+defineFlag<const Name extends string, const Default extends string | undefined = undefined>(
+  options: StringFlagOptions<Name, Default>,
+): Script<In, Ctx, Reserved, Slots, Open, Flags & Record<Name, Default extends string ? string : string | undefined>>
+
+interface BaseFlagOptions<Name extends string> {
+  name: Name;
+  long?: string;   // overrides the default, kebab-cased from `name`
+  short?: string;  // single-letter `-` alias
+  description?: string;
+}
+interface BooleanFlagOptions<Name> extends BaseFlagOptions<Name> {
+  boolean: true;
+  default?: boolean;
+}
+interface StringFlagOptions<Name, Default> extends BaseFlagOptions<Name> {
+  boolean?: false;
+  default?: Default;
+}
+```
+
+Declares a flag `run()` parses off the command line into `context.flags`,
+keyed by `name`. Throws `DuplicateNameError` if `name`, the resolved long
+flag, or `short` is already used by another flag on this script. Full
+treatment in [Flags](../guides/flags).
 
 ## `.addPhase(name, options?)`
 
@@ -82,12 +114,12 @@ addStep<Out, RollbackKeys, CleanKeys>(
 Appends a step to the currently open phase. `StepDef`:
 
 ```ts
-interface StepDef<In, Ctx, Out, RollbackKeys, Slots> {
+interface StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags> {
   name: string;
   description?: string;
-  handler: (context: StepContext<In, Ctx, Slots>) => Awaitable<Out>;
+  handler: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<Out>;
   rollbackKeys?: RollbackKeys & readonly (keyof Merge<Ctx, Out>)[];
-  rollback?: (context: RollbackContext<In, RollbackData<...>, Out, Slots>) => Awaitable<void>;
+  rollback?: (context: RollbackContext<In, RollbackData<...>, Out, Slots, Flags>) => Awaitable<void>;
   when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
   cache?: CacheSource<In, Ctx>;
   retry?: RetryPolicy;
@@ -103,10 +135,10 @@ against the step's incoming context and the keys reserved by earlier
 [Rollbacks](../guides/rollbacks), and
 [Cleaning Context Keys](../guides/cleaning-context).
 
-### `StepContext<In, Ctx, Slots>` (the handler's parameter)
+### `StepContext<In, Ctx, Slots, Flags>` (the handler's parameter)
 
 ```ts
-interface StepContext<In, Ctx, Slots> {
+interface StepContext<In, Ctx, Slots, Flags> {
   readonly input: In;
   readonly ctx: Ctx;
   readonly signal: AbortSignal;
@@ -124,16 +156,19 @@ interface StepContext<In, Ctx, Slots> {
   task(label: string): TaskHandle;
   tasks<const K extends readonly string[]>(labels: K): TaskListHandle<K[number]>;
   readonly cache: CacheHandle<Slots>;
+  readonly prompt: PromptHandle;
+  readonly flags: Flags;
 }
 ```
 
 Full description of every member in
-[The Handler Surface](../guides/handler-surface).
+[The Handler Surface](../guides/handler-surface). `prompt` is documented on its
+own in [Prompts](../guides/prompts), and `flags` in [Flags](../guides/flags).
 
-### `RollbackContext<In, Ctx, Out, Slots>` (the rollback's parameter)
+### `RollbackContext<In, Ctx, Out, Slots, Flags>` (the rollback's parameter)
 
 ```ts
-interface RollbackContext<In, Ctx, Out, Slots> {
+interface RollbackContext<In, Ctx, Out, Slots, Flags> {
   readonly input: In;
   readonly ctx: Ctx;      // only the keys named in rollbackKeys
   readonly output: Out;   // exactly what the handler returned
@@ -146,6 +181,7 @@ interface RollbackContext<In, Ctx, Out, Slots> {
   note(message: string): void;
   progress(options: { total: number; label?: string; value?: number }): ProgressHandle;
   readonly cache: CacheHandle<Slots>;
+  readonly flags: Flags;
 }
 ```
 
@@ -181,6 +217,20 @@ interface TaskListHandle<K extends string> {
   get(key: K): TaskHandle;
 }
 ```
+
+### `PromptHandle`
+
+```ts
+interface PromptHandle {
+  text(options: TextPromptOptions): Promise<string>;
+  confirm(options: ConfirmPromptOptions): Promise<boolean>;
+  select<Value>(options: SelectPromptOptions<Value>): Promise<Value>;
+  multiselect<Value>(options: MultiSelectPromptOptions<Value>): Promise<Value[]>;
+}
+```
+
+Full description, including the non-interactive fallback and the option types,
+in [Prompts](../guides/prompts).
 
 ### `RetryPolicy`
 
@@ -226,22 +276,25 @@ run(input: In, options?: RunOptions): Promise<RunResult<Ctx>>
 
 interface RunOptions {
   signal?: AbortSignal;
-  cache?: CacheMode; // "on" | "off" | "refresh" | "read-only"
+  cache?: CacheMode;        // "on" | "off" | "refresh" | "read-only"
+  argv?: readonly string[]; // default process.argv.slice(2); see defineFlag
 }
 ```
 
-Executes every phase and step in order, applying `defineInput` validation first
-if one was set. Resolves to a `RunResult<Ctx>` (see
+Executes every phase and step in order, applying `defineInput` validation and
+then `defineFlag` parsing first, in that order, if either was set. Resolves to
+a `RunResult<Ctx>` (see
 [Script Options and Results](../guides/script-options-and-result#the-result)),
 unless `throwOnError` is set, in which case a failing run rejects with the
-original error instead.
+original error instead. A bad flag (`UnknownFlagError`, `MissingFlagValueError`)
+always throws directly, the same as a `SchemaValidationError` from a bad input.
 
-## `stepFor<In, Ctx, Slots>()`
+## `stepFor<In, Ctx, Slots, Flags>()`
 
 ```ts
-function stepFor<In, Ctx extends object = {}, Slots = {}>(): <Out, RollbackKeys>(
-  def: StepDef<In, Ctx, Out, RollbackKeys, Slots>,
-) => StepDef<In, Ctx, Out, RollbackKeys, Slots>
+function stepFor<In, Ctx extends object = {}, Slots = {}, Flags = {}>(): <Out, RollbackKeys>(
+  def: StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>,
+) => StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>
 ```
 
 Binds the input and context a step declared outside any script expects, keeping

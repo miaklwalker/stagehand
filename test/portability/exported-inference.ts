@@ -60,6 +60,13 @@ export const mounting = script<{ channel: string }>("mounting")
   .addPhase("After")
   .addStep({ name: "report", handler: ({ ctx }) => ({ reported: ctx.token }) });
 
+/** A script with typed flags — names `Script`'s Flags slot. */
+export const flagged = script<{ channel: string }>("flagged")
+  .defineFlag({ name: "environment", long: "env", short: "e", default: "staging" })
+  .defineFlag({ name: "force", short: "f", boolean: true })
+  .addPhase("Go")
+  .addStep({ name: "run", handler: ({ flags }) => ({ target: flags.environment, forced: flags.force }) });
+
 /** A standalone step — names `StepDef`. */
 export const standalone = stepFor<{ channel: string }>()({
   name: "standalone",

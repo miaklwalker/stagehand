@@ -47,10 +47,10 @@ export class StepDefinitionError extends Error {
  * failure — so it is refused up front.
  */
 export class DuplicateNameError extends Error {
-  readonly kind: "phase" | "step";
+  readonly kind: "phase" | "step" | "flag";
   readonly duplicate: string;
 
-  constructor(kind: "phase" | "step", duplicate: string, message: string) {
+  constructor(kind: "phase" | "step" | "flag", duplicate: string, message: string) {
     super(message);
     this.name = "DuplicateNameError";
     this.kind = kind;
@@ -137,9 +137,60 @@ export class RollbackFailedError extends Error {
   }
 }
 
+/**
+ * `run()` saw `--foo` or `-f` on the command line, but no `defineFlag` call
+ * named it. Thrown before any phase executes, the same as a bad `defineInput`
+ * schema — parsing happens once, up front.
+ */
+export class UnknownFlagError extends Error {
+  readonly flag: string;
+
+  constructor(flag: string, known: readonly string[]) {
+    super(
+      `Unknown flag "${flag}". ` +
+        (known.length > 0 ? `Declared flags: ${known.join(", ")}.` : "This script declares no flags."),
+    );
+    this.name = "UnknownFlagError";
+    this.flag = flag;
+  }
+}
+
+/** A non-boolean flag was given with nothing after it — `--env` with no value. */
+export class MissingFlagValueError extends Error {
+  readonly flag: string;
+
+  constructor(flag: string) {
+    super(`Flag "${flag}" expects a value ("${flag} <value>" or "${flag}=<value>"), but none was given.`);
+    this.name = "MissingFlagValueError";
+    this.flag = flag;
+  }
+}
+
+/** A `context.prompt` call was cancelled — Ctrl-C while waiting on input. */
+export class PromptCancelledError extends Error {
+  constructor() {
+    super("Prompt cancelled");
+    this.name = "PromptCancelledError";
+  }
+}
+
+/**
+ * A step called `context.prompt` but stdin isn't an interactive terminal —
+ * CI, a pipe, a non-TTY subprocess — and the prompt declared no `default` to
+ * fall back to. Thrown instead of hanging on a stream nothing will ever
+ * write to.
+ */
+export class PromptUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PromptUnavailableError";
+  }
+}
+
 export function isAbort(error: unknown): boolean {
   return (
     error instanceof ScriptAbortedError ||
+    error instanceof PromptCancelledError ||
     (error instanceof Error && error.name === "AbortError")
   );
 }

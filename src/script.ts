@@ -17,9 +17,11 @@ import {
   StepTimeoutError,
   isAbort,
 } from "./errors.js";
+import { type FlagDef, kebabCase, parseFlags } from "./flags.js";
 import { errorMessage, type PhaseState, type RunState, type StepState } from "./state.js";
 import type {
   Awaitable,
+  BooleanFlagOptions,
   CacheMode,
   CacheSource,
   CleanField,
@@ -33,6 +35,8 @@ import type {
   ScriptOptions,
   SlotValue,
   StepDef,
+  StringFlagOptions,
+  UnknownFlags,
   UnknownSlots,
   StepReport,
   InheritedKeyStepDef,
@@ -202,6 +206,12 @@ export interface RunOptions {
    * to control caching without touching the script.
    */
   cache?: CacheMode;
+  /**
+   * Argv to parse `defineFlag`'s flags out of. Default `process.argv.slice(2)`
+   * — override it in a test, or when this script is one subcommand of a
+   * larger CLI that has already sliced its own argv apart.
+   */
+  argv?: readonly string[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -241,6 +251,7 @@ export class Script<
   Reserved extends PropertyKey = never,
   Slots = {},
   Open extends OpenPhase = ClosedPhase,
+  Flags extends object = {},
 > {
   /**
    * Phantom, erased at compile time. `run` is a *method*, so its parameter
@@ -258,6 +269,10 @@ export class Script<
   /** False right after `use()`, so a bare `addStep` cannot land in a fragment. */
   private openPhase = false;
   private _schema: StandardSchemaV1 | undefined;
+  private readonly flagDefs: FlagDef[] = [];
+  private readonly flagNames = new Set<string>();
+  private readonly flagLongs = new Set<string>();
+  private readonly flagShorts = new Set<string>();
 
   constructor(options: ScriptOptions | string = {}) {
     this.options = typeof options === "string" ? { name: options } : options;
@@ -288,9 +303,11 @@ export class Script<
    *   });
    * ```
    */
-  defineInput<TSchema>(schema: StandardSchemaV1<unknown, TSchema>): Script<TSchema, Ctx, Reserved> {
+  defineInput<TSchema>(
+    schema: StandardSchemaV1<unknown, TSchema>,
+  ): Script<TSchema, Ctx, Reserved, {}, ClosedPhase, Flags> {
     this._schema = schema as StandardSchemaV1;
-    return this as unknown as Script<TSchema, Ctx, Reserved>;
+    return this as unknown as Script<TSchema, Ctx, Reserved, {}, ClosedPhase, Flags>;
   }
 
   /** Validate `input` against the schema from `defineInput`, if any. */
@@ -299,6 +316,90 @@ export class Script<
     const result = await this._schema["~standard"].validate(input);
     if (result.issues) throw new SchemaValidationError(result.issues);
     return result.value as In;
+  }
+
+  /**
+   * Declare a flag this script reads off the command line. `name` is both the
+   * property `context.flags` exposes it under and — kebab-cased — the default
+   * long `--` form; `short` adds a single-letter `-` alias, and `long`
+   * overrides the derived one when it should read differently from `name`.
+   *
+   * A `boolean: true` flag is present or absent (`myScript --force`) and
+   * always resolves to a `boolean`, defaulting to `false` unless
+   * `default: true`. Anything else is a string: `myScript --env prod` or
+   * `myScript -e prod`, resolving to `string` when a `default` is given, or
+   * `string | undefined` otherwise. Values are parsed from `process.argv`
+   * (or `run(input, { argv })`) once, before any phase executes.
+   *
+   * ```ts
+   * new Script({ name: "deploy" })
+   *   .defineFlag({ name: "environment", long: "env", short: "e", default: "staging" })
+   *   .defineFlag({ name: "force", short: "f", boolean: true })
+   *   .addStep({
+   *     name: "deploy",
+   *     // flags.environment: string, flags.force: boolean
+   *     handler: async ({ flags }) => { ... },
+   *   });
+   * ```
+   *
+   * @throws {DuplicateNameError} if `name`, the resolved long flag, or `short`
+   * is already used by another flag on this script.
+   */
+  defineFlag<const Name extends string>(
+    options: BooleanFlagOptions<Name>,
+  ): Script<In, Ctx, Reserved, Slots, Open, Flags & Record<Name, boolean>>;
+  defineFlag<const Name extends string, const Default extends string | undefined = undefined>(
+    options: StringFlagOptions<Name, Default>,
+  ): Script<
+    In,
+    Ctx,
+    Reserved,
+    Slots,
+    Open,
+    Flags & Record<Name, Default extends string ? string : string | undefined>
+  >;
+  defineFlag(options: BooleanFlagOptions | StringFlagOptions): unknown {
+    const long = options.long ?? kebabCase(options.name);
+    this.claimFlagIdentity(options.name, long, options.short);
+
+    const boolean = options.boolean === true;
+    const hasDefault = "default" in options && options.default !== undefined;
+    this.flagDefs.push({
+      name: options.name,
+      long,
+      ...(options.short !== undefined ? { short: options.short } : {}),
+      ...(options.description !== undefined ? { description: options.description } : {}),
+      boolean,
+      hasDefault,
+      default: options.default,
+    });
+    return this;
+  }
+
+  /**
+   * Flag identities have to be unique the same way phase and step names do —
+   * `name` is the property key on `context.flags`, and the long/short forms
+   * are what argv is matched against.
+   */
+  private claimFlagIdentity(name: string, long: string, short: string | undefined): void {
+    if (this.flagNames.has(name)) {
+      throw new DuplicateNameError("flag", name, `Flag "${name}" is already defined on this script.`);
+    }
+    if (this.flagLongs.has(long)) {
+      throw new DuplicateNameError("flag", long, `Flag "--${long}" is already defined on this script.`);
+    }
+    if (short !== undefined && this.flagShorts.has(short)) {
+      throw new DuplicateNameError("flag", short, `Flag "-${short}" is already defined on this script.`);
+    }
+    this.flagNames.add(name);
+    this.flagLongs.add(long);
+    if (short !== undefined) this.flagShorts.add(short);
+  }
+
+  /** Parse `argv` against this script's declared flags — `{}` when none are. */
+  private resolveFlags(argv: readonly string[] | undefined): Record<string, unknown> {
+    if (this.flagDefs.length === 0) return {};
+    return parseFlags(argv ?? process.argv.slice(2), this.flagDefs);
   }
 
   /**
@@ -314,7 +415,8 @@ export class Script<
     Ctx,
     Reserved,
     Commit<Slots, Open>,
-    { name: Name; phase: Name; schema: Value; delta: {} }
+    { name: Name; phase: Name; schema: Value; delta: {} },
+    Flags
   >;
   /** Open a new phase. Subsequent `addStep` calls land in it. */
   addPhase<const Name extends string>(
@@ -326,7 +428,8 @@ export class Script<
     Reserved,
     Commit<Slots, Open>,
     // Not a slot itself, but its steps' slots are named after it.
-    { name: never; phase: Name; schema: unknown; delta: {} }
+    { name: never; phase: Name; schema: unknown; delta: {} },
+    Flags
   >;
   /** Open a phase and populate it inside a callback, keeping the type flow. */
   addPhase<
@@ -334,24 +437,26 @@ export class Script<
     NextReserved extends PropertyKey,
     NextSlots,
     NextOpen extends OpenPhase,
+    NextFlags extends object,
   >(
     name: string,
     build: (
-      script: Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase>,
-    ) => Script<In, Next, NextReserved, NextSlots, NextOpen>,
-  ): Script<In, Next, NextReserved, NextSlots, NextOpen>;
+      script: Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase, Flags>,
+    ) => Script<In, Next, NextReserved, NextSlots, NextOpen, NextFlags>,
+  ): Script<In, Next, NextReserved, NextSlots, NextOpen, NextFlags>;
   addPhase<
     Next extends object,
     NextReserved extends PropertyKey,
     NextSlots,
     NextOpen extends OpenPhase,
+    NextFlags extends object,
   >(
     name: string,
     options: PhaseOptions<In, Ctx>,
     build: (
-      script: Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase>,
-    ) => Script<In, Next, NextReserved, NextSlots, NextOpen>,
-  ): Script<In, Next, NextReserved, NextSlots, NextOpen>;
+      script: Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase, Flags>,
+    ) => Script<In, Next, NextReserved, NextSlots, NextOpen, NextFlags>,
+  ): Script<In, Next, NextReserved, NextSlots, NextOpen, NextFlags>;
   addPhase(
     name: string,
     optionsOrBuild?: PhaseOptions<In, Ctx> | ((script: never) => unknown),
@@ -405,7 +510,7 @@ export class Script<
     const RollbackKeys extends readonly (keyof Ctx)[] = readonly [],
     const CleanKeys extends readonly PropertyKey[] = readonly [],
   >(
-    def: Omit<InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots>, "name"> &
+    def: Omit<InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>, "name"> &
       CleanField<Ctx, Reserved, CleanKeys> & { name: Name; cache: CacheSource<In, Ctx> },
   ): Script<
     In,
@@ -417,7 +522,8 @@ export class Script<
       phase: Open["phase"];
       schema: Open["schema"];
       delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
-    }
+    },
+    Flags
   >;
   /** Plain, `rollbackKeys` inherited. See {@link InheritedKeyStepDef}. */
   addStep<
@@ -425,7 +531,7 @@ export class Script<
     const RollbackKeys extends readonly (keyof Ctx)[] = readonly [],
     const CleanKeys extends readonly PropertyKey[] = readonly [],
   >(
-    def: InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots> &
+    def: InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots, Flags> &
       CleanField<Ctx, Reserved, CleanKeys>,
   ): Script<
     In,
@@ -437,7 +543,8 @@ export class Script<
       phase: Open["phase"];
       schema: Open["schema"];
       delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
-    }
+    },
+    Flags
   >;
   /** Cached, general form. See {@link StepDef}. */
   addStep<
@@ -446,7 +553,7 @@ export class Script<
     const RollbackKeys extends readonly PropertyKey[] = readonly [],
     const CleanKeys extends readonly PropertyKey[] = readonly [],
   >(
-    def: Omit<StepDef<In, Ctx, Out, RollbackKeys, Slots>, "name"> &
+    def: Omit<StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>, "name"> &
       CleanField<Ctx, Reserved, CleanKeys> & { name: Name; cache: CacheSource<In, Ctx> },
   ): Script<
     In,
@@ -458,7 +565,8 @@ export class Script<
       phase: Open["phase"];
       schema: Open["schema"];
       delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
-    }
+    },
+    Flags
   >;
   /** Plain, general form. See {@link StepDef}. */
   addStep<
@@ -466,7 +574,7 @@ export class Script<
     const RollbackKeys extends readonly PropertyKey[] = readonly [],
     const CleanKeys extends readonly PropertyKey[] = readonly [],
   >(
-    def: StepDef<In, Ctx, Out, RollbackKeys, Slots> & CleanField<Ctx, Reserved, CleanKeys>,
+    def: StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags> & CleanField<Ctx, Reserved, CleanKeys>,
   ): Script<
     In,
     Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
@@ -479,7 +587,8 @@ export class Script<
       phase: Open["phase"];
       schema: Open["schema"];
       delta: Cleaned<Merge<Open["delta"], Out>, CleanKeys[number]>;
-    }
+    },
+    Flags
   >;
   addStep(def: object): unknown {
     const step = def as unknown as AnyStepDef;
@@ -548,23 +657,28 @@ export class Script<
   >(
     routine: Routine<SubIn, Ctx, Out, R, RS>,
     options: { as?: As; input: MountInput<In, Ctx, SubIn> },
-  ): Script<In, Merge<Ctx, Out>, Reserved | R, Commit<Slots, Open> & Mounted<As, RS>, ClosedPhase>;
+  ): Script<In, Merge<Ctx, Out>, Reserved | R, Commit<Slots, Open> & Mounted<As, RS>, ClosedPhase, Flags>;
   use<
     SubIn,
     Out extends object,
     R extends PropertyKey,
     SS,
     SO extends OpenPhase,
+    // The mounted script's own Flags, if it declared any — dropped rather
+    // than merged in. Flags model process-level CLI input for the top-level
+    // entry script, not something a reusable fragment composes.
+    MF extends object,
     const As extends string | undefined = undefined,
   >(
-    script: Script<SubIn, Out, R, SS, SO>,
+    script: Script<SubIn, Out, R, SS, SO, MF>,
     options: { as?: As; input: MountInput<In, Ctx, SubIn> },
   ): Script<
     In,
     Merge<Ctx, Out>,
     Reserved | R,
     Commit<Slots, Open> & Mounted<As, Commit<SS, SO>>,
-    ClosedPhase
+    ClosedPhase,
+    Flags
   >;
   // Script before Routine: on a failed call TypeScript reports the *last*
   // overload's error, and "not assignable to Routine<...>" names the missing
@@ -575,16 +689,18 @@ export class Script<
     R extends PropertyKey,
     SS,
     SO extends OpenPhase,
+    MF extends object,
     const As extends string | undefined = undefined,
   >(
-    script: Script<In, Out, R, SS, SO>,
+    script: Script<In, Out, R, SS, SO, MF>,
     options?: { as?: As },
   ): Script<
     In,
     Merge<Ctx, Out>,
     Reserved | R,
     Commit<Slots, Open> & Mounted<As, Commit<SS, SO>>,
-    ClosedPhase
+    ClosedPhase,
+    Flags
   >;
   use<
     Out extends object,
@@ -594,7 +710,7 @@ export class Script<
   >(
     routine: Routine<In, Ctx, Out, R, RS>,
     options?: { as?: As },
-  ): Script<In, Merge<Ctx, Out>, Reserved | R, Commit<Slots, Open> & Mounted<As, RS>, ClosedPhase>;
+  ): Script<In, Merge<Ctx, Out>, Reserved | R, Commit<Slots, Open> & Mounted<As, RS>, ClosedPhase, Flags>;
   use(source: object, options: MountOptions & { input?: unknown } = {}): unknown {
     const body = bodies.get(source);
     if (!body) {
@@ -684,6 +800,7 @@ export class Script<
 
   async run(input: In, runOptions: RunOptions = {}): Promise<RunResult<Ctx>> {
     input = await this.validateInput(input);
+    const flags = this.resolveFlags(runOptions.argv);
 
     const runtime: RuntimeStep[] = [];
     const phases: PhaseState[] = this.definition.map((phase, phaseIndex) => {
@@ -894,6 +1011,7 @@ export class Script<
               runController.signal,
               renderer,
               cache,
+              flags,
             );
             item.state.status = "success";
             item.state.endedAt = performance.now();
@@ -955,6 +1073,7 @@ export class Script<
           rollbacks,
           rollbackController.signal,
           renderer,
+          flags,
         );
       } else {
         state.status = "success";
@@ -1013,6 +1132,7 @@ export class Script<
     runSignal: AbortSignal,
     renderer: Renderer,
     cache: ContextDeps["cache"],
+    flags: ContextDeps["flags"],
   ): Promise<unknown> {
     const retry = item.def.retry;
     const maxAttempts = Math.max(1, retry?.attempts ?? 1);
@@ -1038,7 +1158,7 @@ export class Script<
 
       try {
         const context = createStepContext(
-          { renderer, step: item.state, phaseName: item.phaseName, cache },
+          { renderer, step: item.state, phaseName: item.phaseName, cache, flags },
           input,
           ctx,
           controller.signal,
@@ -1079,6 +1199,7 @@ export class Script<
     rollbacks: RollbackReport[],
     signal: AbortSignal,
     renderer: Renderer,
+    flags: ContextDeps["flags"],
   ): Promise<void> {
     const mode = this.options.rollback ?? "all";
     if (mode === "none") return;
@@ -1097,7 +1218,7 @@ export class Script<
 
       try {
         const context = createRollbackContext(
-          { renderer, step: entry.runtime.state, phaseName: entry.runtime.phaseName, cache },
+          { renderer, step: entry.runtime.state, phaseName: entry.runtime.phaseName, cache, flags },
           // The input this step actually ran with — a mounted fragment's
           // rollback sees its mount's input, not the host's.
           entry.input,
@@ -1265,7 +1386,12 @@ function abortRejection(signal: AbortSignal): { promise: Promise<never>; dispose
  * `rollbackKeys` works the same here, and the keys it names stay reserved once
  * the step is handed to `addStep`.
  */
-export function stepFor<In, Ctx extends object = {}, Slots = UnknownSlots>() {
+export function stepFor<
+  In,
+  Ctx extends object = {},
+  Slots = UnknownSlots,
+  Flags = UnknownFlags,
+>() {
   /**
    * Split in two for the same reason `addStep` is: the first form keeps `Out`
    * off `rollbackKeys` so the handler is its only inference site. See
@@ -1275,14 +1401,14 @@ export function stepFor<In, Ctx extends object = {}, Slots = UnknownSlots>() {
     Out extends object | void = void,
     const RollbackKeys extends readonly (keyof Ctx)[] = readonly [],
   >(
-    def: InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots>,
-  ): StepDef<In, Ctx, Out, RollbackKeys, Slots>;
+    def: InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>,
+  ): StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>;
   function define<
     Out extends object | void,
     const RollbackKeys extends readonly PropertyKey[] = readonly [],
   >(
-    def: StepDef<In, Ctx, Out, RollbackKeys, Slots>,
-  ): StepDef<In, Ctx, Out, RollbackKeys, Slots>;
+    def: StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>,
+  ): StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>;
   function define(def: object): object {
     return def;
   }

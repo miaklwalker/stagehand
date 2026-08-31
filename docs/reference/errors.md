@@ -32,19 +32,48 @@ that was never declared as a cached phase or step. See
 
 ```ts
 class DuplicateNameError extends Error {
-  readonly kind: "phase" | "step";
+  readonly kind: "phase" | "step" | "flag";
   readonly duplicate: string;
 }
 ```
 
 Thrown by `addPhase` when a phase name is already used anywhere in the script
-(including one brought in by `use()`), and by `addStep` when a step name is
-already used within its own phase. The same step name in two *different* phases
-is fine. Mounting the same routine twice without giving each mount an `as`
-prefix is the most common trigger; see
-[Reusable Scripts and Mounts](../guides/reusable-scripts#mounting-twice).
+(including one brought in by `use()`), by `addStep` when a step name is
+already used within its own phase, and by `defineFlag` when a flag's `name`,
+resolved long form, or `short` collides with one already declared. The same
+step name in two *different* phases is fine. Mounting the same routine twice
+without giving each mount an `as` prefix is the most common phase-kind
+trigger; see
+[Reusable Scripts and Mounts](../guides/reusable-scripts#mounting-twice) and
+[Flags](../guides/flags).
 
 ## Run-time errors
+
+### `UnknownFlagError`
+
+```ts
+class UnknownFlagError extends Error {
+  readonly flag: string; // e.g. "--nope" or "-x"
+}
+```
+
+Thrown by `run()` when argv has a `--foo` or `-f` that no `defineFlag` call
+declared. Parsed once, before any phase executes — the same as a bad
+`defineInput` schema. Only checked once at least one flag has been declared;
+a script with none ignores whatever is in argv. See
+[Flags](../guides/flags#unknown-flags-and-missing-values).
+
+### `MissingFlagValueError`
+
+```ts
+class MissingFlagValueError extends Error {
+  readonly flag: string;
+}
+```
+
+Thrown by `run()` when a non-boolean flag is the last token in argv, with
+nothing after it to be its value. See
+[Flags](../guides/flags#unknown-flags-and-missing-values).
 
 ### `SchemaValidationError`
 
@@ -122,6 +151,26 @@ whatever the handler actually threw). Exported for use in a caller's own error
 handling; `result.error` on a failed run is the original thrown value, not
 automatically wrapped in this type.
 
+### `PromptCancelledError`
+
+```ts
+class PromptCancelledError extends Error {}
+```
+
+Thrown by `context.prompt` when Ctrl-C is pressed while a prompt is open.
+Recognized by `isAbort`, so the run unwinds exactly as it would for a SIGINT —
+see [Prompts](../guides/prompts#cancelling-a-prompt).
+
+### `PromptUnavailableError`
+
+```ts
+class PromptUnavailableError extends Error {}
+```
+
+Thrown by `context.prompt` when stdin isn't an interactive terminal (CI, a
+pipe, a non-TTY subprocess) and the prompt declared no `default` to fall back
+to. See [Prompts](../guides/prompts#non-interactive-stdin).
+
 ## Cache errors
 
 ### `CacheShapeError`
@@ -145,8 +194,9 @@ exact property access that failed, dotted through arrays and objects. See
 function isAbort(error: unknown): boolean
 ```
 
-Returns `true` for a `ScriptAbortedError`, or any `Error` whose `name` is
-`"AbortError"` (the DOM/Node convention other abort-aware APIs use). Use it to
+Returns `true` for a `ScriptAbortedError`, a `PromptCancelledError`, or any
+`Error` whose `name` is `"AbortError"` (the DOM/Node convention other
+abort-aware APIs use). Use it to
 tell a genuine cancellation apart from an ordinary handler failure when
 inspecting `result.error`:
 

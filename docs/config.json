@@ -16,6 +16,8 @@
         { "label": "Rollbacks", "to": "guides/rollbacks" },
         { "label": "Cleaning Context Keys", "to": "guides/cleaning-context" },
         { "label": "The Handler Surface", "to": "guides/handler-surface" },
+        { "label": "Prompts", "to": "guides/prompts" },
+        { "label": "Flags", "to": "guides/flags" },
         { "label": "Caching", "to": "guides/caching" },
         { "label": "Script Options and Results", "to": "guides/script-options-and-result" },
         { "label": "Splitting Steps Across Files", "to": "guides/splitting-steps" },

@@ -1,8 +1,11 @@
+import { ScriptAbortedError } from "./errors.js";
 import type { CacheHandle } from "./types.js";
 import type { LogLevel, ProgressState, StepState, TaskState } from "./state.js";
+import { promptConfirm, promptMultiselect, promptSelect, promptText } from "./ui/prompt.js";
 import type { Renderer } from "./ui/renderer.js";
 import type {
   ProgressHandle,
+  PromptHandle,
   RollbackContext,
   StepContext,
   TaskHandle,
@@ -106,6 +109,8 @@ export interface ContextDeps {
   phaseName: string;
   /** Backs `context.cache`; slots declared before the current step. */
   cache: CacheHandle<Record<string, unknown>>;
+  /** Backs `context.flags`; parsed once from argv before any phase runs. */
+  flags: Record<string, unknown>;
 }
 
 /** Set (or, given "", clear) the step's persistent title annotation. */
@@ -115,6 +120,29 @@ function annotate(step: StepState, renderer: Renderer, message: string): void {
   renderer.refresh();
 }
 
+/**
+ * Suspends the live frame around each call so a prompt owns the terminal,
+ * then hands it back — resolve or reject, cancelled or not.
+ */
+function createPrompt(renderer: Renderer, signal: AbortSignal): PromptHandle {
+  const wrap = async <T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+    if (signal.aborted) throw signal.reason ?? new ScriptAbortedError("cancelled");
+    renderer.suspend();
+    try {
+      return await run(signal);
+    } finally {
+      renderer.resume();
+    }
+  };
+
+  return {
+    text: (options) => wrap((s) => promptText(options, s)),
+    confirm: (options) => wrap((s) => promptConfirm(options, s)),
+    select: (options) => wrap((s) => promptSelect(options, s)),
+    multiselect: (options) => wrap((s) => promptMultiselect(options, s)),
+  };
+}
+
 export function createStepContext<In, Ctx>(
   deps: ContextDeps,
   input: In,
@@ -122,7 +150,7 @@ export function createStepContext<In, Ctx>(
   signal: AbortSignal,
   attempt: number,
 ): StepContext<In, Ctx> {
-  const { renderer, step, phaseName, cache } = deps;
+  const { renderer, step, phaseName, cache, flags } = deps;
   // `step` is a routing hint: renderers that place logs on the step itself
   // (rather than the scrollback) need to know which one.
   const emit = (level: LogLevel) => (message: string) => renderer.log({ level, message }, step);
@@ -133,6 +161,7 @@ export function createStepContext<In, Ctx>(
     signal,
     attempt,
     cache,
+    flags,
     phase: phaseName,
     step: step.name,
     log: emit("log"),
@@ -148,6 +177,7 @@ export function createStepContext<In, Ctx>(
     progress: (options) => createProgress(step, renderer, options),
     task: (label) => createTask(step, renderer, label),
     tasks: (labels) => createTaskList(step, renderer, labels),
+    prompt: createPrompt(renderer, signal),
   };
 }
 
@@ -159,7 +189,7 @@ export function createRollbackContext<In, Ctx, Out>(
   error: unknown,
   signal: AbortSignal,
 ): RollbackContext<In, Ctx, Out> {
-  const { renderer, step, phaseName, cache } = deps;
+  const { renderer, step, phaseName, cache, flags } = deps;
   return {
     input,
     ctx,
@@ -167,6 +197,7 @@ export function createRollbackContext<In, Ctx, Out>(
     error,
     signal,
     cache,
+    flags,
     phase: phaseName,
     step: step.name,
     log: (message) => renderer.log({ level: "warn", message }, step),
