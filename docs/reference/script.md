@@ -93,10 +93,10 @@ scope while preserving the same type flow as the flat form. Throws
 `PhaseOptions`:
 
 ```ts
-interface PhaseOptions<In, Ctx> {
+interface PhaseOptions<In, Ctx, Flags> {
   description?: string;
-  when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
-  cache?: CacheSource<In, Ctx>;
+  when?: (context: { input: In; ctx: Ctx; flags: Flags }) => Awaitable<boolean>;
+  cache?: CacheSource<In, Ctx, unknown, Flags>;
 }
 ```
 
@@ -120,8 +120,8 @@ interface StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags> {
   handler: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<Out>;
   rollbackKeys?: RollbackKeys & readonly (keyof Merge<Ctx, Out>)[];
   rollback?: (context: RollbackContext<In, RollbackData<...>, Out, Slots, Flags>) => Awaitable<void>;
-  when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
-  cache?: CacheSource<In, Ctx>;
+  when?: (context: { input: In; ctx: Ctx; flags: Flags }) => Awaitable<boolean>;
+  cache?: CacheSource<In, Ctx, unknown, Flags>;
   retry?: RetryPolicy;
   timeoutMs?: number;
 }
@@ -245,20 +245,28 @@ interface RetryPolicy {
 ## `.use(source, options?)`
 
 ```ts
-use(routine: Routine<SubIn, Ctx, Out, R, RS>, options: { as?: string; input: MountInput<In, Ctx, SubIn> }): Script<...>
-use(script: Script<SubIn, Out, R, SS, SO>, options: { as?: string; input: MountInput<In, Ctx, SubIn> }): Script<...>
+use(routine: Routine<SubIn, Ctx, Out, R, RS>, options: { as?: string; input: MountInput<In, Ctx, SubIn, Flags> }): Script<...>
+use(script: Script<SubIn, Out, R, SS, SO>, options: { as?: string; input: MountInput<In, Ctx, SubIn, Flags> }): Script<...>
 use(script: Script<In, Out, R, SS, SO>, options?: { as?: string }): Script<...>
 use(routine: Routine<In, Ctx, Out, R, RS>, options?: { as?: string }): Script<...>
+
+type MountInput<In, Ctx, SubIn, Flags> =
+  | SubIn
+  | ((context: { input: In; ctx: Ctx; flags: Flags }) => Awaitable<SubIn>);
 ```
 
 Splices a `Routine` (from `routineFor`) or another `Script` into this one. With
 no `input` option the source must already accept this script's `In`/`Ctx`
-directly; with `input`, a fixed value or a `{ input, ctx } => SubIn` mapper
-feeds the mount something else, resolved once when the mount is reached. `as`
-prefixes the mounted phases' (and their cache slots') names, required when
-mounting the same source twice. Throws `DuplicateNameError` on a name collision,
-or `StepDefinitionError` if `source` is neither a `Routine` nor a `Script`.
-Full treatment in [Reusable Scripts and Mounts](../guides/reusable-scripts).
+directly; with `input`, a fixed value or a `{ input, ctx, flags } => SubIn`
+mapper feeds the mount something else, resolved once when the mount is
+reached — the native way to project a flag onto a routine's input, with no
+manual step needed: `use(routine, { input: ({ flags }) => ({ env: flags.environment }) })`.
+`as` prefixes the mounted phases' (and their cache slots') names, required
+when mounting the same source twice. Throws `DuplicateNameError` on a name
+collision, or `StepDefinitionError` if `source` is neither a `Routine` nor a
+`Script`. Full treatment in
+[Reusable Scripts and Mounts](../guides/reusable-scripts) and
+[Flags](../guides/flags#mapping-a-flag-onto-a-routines-input).
 
 ## `.outline()`
 
@@ -323,10 +331,15 @@ See [Splitting Steps Across Files](../guides/splitting-steps).
 ```ts
 function routineFor<In, Ctx extends object = {}>(): <Out, R, S, O>(
   name: string,
-  build: (script: Script<In, Ctx, never>) => Script<In, Out, R, S, O>,
+  build: (script: Script<In, Ctx, never, {}, ClosedPhase, UnknownFlags>) => Script<In, Out, R, S, O>,
 ) => Routine<In, Ctx, Out, R, Commit<S, O>>
 ```
 
 Declares a reusable fragment of phases, built with an ordinary `Script` inside
-the callback and recorded under `name`. Mount it with `.use()`. See
-[Reusable Scripts and Mounts](../guides/reusable-scripts).
+the callback and recorded under `name`. Mount it with `.use()`. The builder
+script's `Flags` is `UnknownFlags`, not `{}` — a routine is written away from
+any particular script and cannot know what flags the eventual host will
+declare, so a step added inside the callback can still read `context.flags`
+(typed loosely, as `Record<string, unknown>`) rather than being stuck with an
+unusable empty type. `use()` does not merge a routine's own flags into the
+host's `Flags` either way — see [Flags](../guides/flags#only-at-the-top-level).

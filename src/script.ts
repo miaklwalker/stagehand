@@ -54,7 +54,7 @@ interface AnyStepDef {
   rollbackKeys?: readonly string[];
   rollback?: (context: unknown) => unknown;
   clean?: readonly string[];
-  when?: (context: { input: unknown; ctx: unknown }) => unknown;
+  when?: (context: { input: unknown; ctx: unknown; flags: unknown }) => unknown;
   cache?: CacheSource;
   retry?: RetryPolicy;
   timeoutMs?: number;
@@ -150,12 +150,13 @@ export interface MountOptions {
 
 /**
  * What a mount feeds its fragment instead of the host's own input — either a
- * fixed value or a function of the host's input and context, resolved once
- * when the mount is reached.
+ * fixed value or a function of the host's input, context, and flags, resolved
+ * once when the mount is reached. This is the native way to project a flag
+ * onto a routine's input: `use(routine, { input: ({ flags }) => ({ env: flags.environment }) })`.
  */
-export type MountInput<In, Ctx, SubIn> =
+export type MountInput<In, Ctx, SubIn, Flags = UnknownFlags> =
   | SubIn
-  | ((context: { input: In; ctx: Ctx }) => Awaitable<SubIn>);
+  | ((context: { input: In; ctx: Ctx; flags: Flags }) => Awaitable<SubIn>);
 
 /** Per-run resolution state for one mount. Identity is the map key. */
 interface MountBinding {
@@ -193,8 +194,11 @@ export type Commit<Slots, Open extends OpenPhase> = Slots &
   Record<Open["name"], SlotValue<Open["schema"], Open["delta"]>>;
 
 /** Phase options with `cache` required, so the cached overload is unambiguous. */
-export type CachedPhaseOptions<In, Ctx, Value> = Omit<PhaseOptions<In, Ctx>, "cache"> & {
-  cache: CacheSource<In, Ctx, Value>;
+export type CachedPhaseOptions<In, Ctx, Value, Flags = UnknownFlags> = Omit<
+  PhaseOptions<In, Ctx, Flags>,
+  "cache"
+> & {
+  cache: CacheSource<In, Ctx, Value, Flags>;
 };
 
 export interface RunOptions {
@@ -409,7 +413,7 @@ export class Script<
    */
   addPhase<const Name extends string, Value = unknown>(
     name: Name,
-    options: CachedPhaseOptions<In, Ctx, Value>,
+    options: CachedPhaseOptions<In, Ctx, Value, Flags>,
   ): Script<
     In,
     Ctx,
@@ -421,7 +425,7 @@ export class Script<
   /** Open a new phase. Subsequent `addStep` calls land in it. */
   addPhase<const Name extends string>(
     name: Name,
-    options?: PhaseOptions<In, Ctx>,
+    options?: PhaseOptions<In, Ctx, Flags>,
   ): Script<
     In,
     Ctx,
@@ -452,14 +456,14 @@ export class Script<
     NextFlags extends object,
   >(
     name: string,
-    options: PhaseOptions<In, Ctx>,
+    options: PhaseOptions<In, Ctx, Flags>,
     build: (
       script: Script<In, Ctx, Reserved, Commit<Slots, Open>, ClosedPhase, Flags>,
     ) => Script<In, Next, NextReserved, NextSlots, NextOpen, NextFlags>,
   ): Script<In, Next, NextReserved, NextSlots, NextOpen, NextFlags>;
   addPhase(
     name: string,
-    optionsOrBuild?: PhaseOptions<In, Ctx> | ((script: never) => unknown),
+    optionsOrBuild?: PhaseOptions<In, Ctx, Flags> | ((script: never) => unknown),
     maybeBuild?: (script: never) => unknown,
   ): unknown {
     const build =
@@ -511,7 +515,7 @@ export class Script<
     const CleanKeys extends readonly PropertyKey[] = readonly [],
   >(
     def: Omit<InheritedKeyStepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>, "name"> &
-      CleanField<Ctx, Reserved, CleanKeys> & { name: Name; cache: CacheSource<In, Ctx> },
+      CleanField<Ctx, Reserved, CleanKeys> & { name: Name; cache: CacheSource<In, Ctx, unknown, Flags> },
   ): Script<
     In,
     Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
@@ -554,7 +558,7 @@ export class Script<
     const CleanKeys extends readonly PropertyKey[] = readonly [],
   >(
     def: Omit<StepDef<In, Ctx, Out, RollbackKeys, Slots, Flags>, "name"> &
-      CleanField<Ctx, Reserved, CleanKeys> & { name: Name; cache: CacheSource<In, Ctx> },
+      CleanField<Ctx, Reserved, CleanKeys> & { name: Name; cache: CacheSource<In, Ctx, unknown, Flags> },
   ): Script<
     In,
     Cleaned<Merge<Ctx, Out>, CleanKeys[number]>,
@@ -656,7 +660,7 @@ export class Script<
     const As extends string | undefined = undefined,
   >(
     routine: Routine<SubIn, Ctx, Out, R, RS>,
-    options: { as?: As; input: MountInput<In, Ctx, SubIn> },
+    options: { as?: As; input: MountInput<In, Ctx, SubIn, Flags> },
   ): Script<In, Merge<Ctx, Out>, Reserved | R, Commit<Slots, Open> & Mounted<As, RS>, ClosedPhase, Flags>;
   use<
     SubIn,
@@ -671,7 +675,7 @@ export class Script<
     const As extends string | undefined = undefined,
   >(
     script: Script<SubIn, Out, R, SS, SO, MF>,
-    options: { as?: As; input: MountInput<In, Ctx, SubIn> },
+    options: { as?: As; input: MountInput<In, Ctx, SubIn, Flags> },
   ): Script<
     In,
     Merge<Ctx, Out>,
@@ -902,14 +906,16 @@ export class Script<
             mountInputs.set(
               phase.mount,
               (typeof source === "function"
-                ? await (source as (context: { input: In; ctx: Ctx }) => Awaitable<In>)({ input, ctx })
+                ? await (
+                    source as (context: { input: In; ctx: Ctx; flags: typeof flags }) => Awaitable<In>
+                  )({ input, ctx, flags })
                 : source) as In,
             );
           }
           phaseInput = mountInputs.get(phase.mount) as In;
         }
 
-        if (phase.options.when && !(await phase.options.when({ input: phaseInput, ctx }))) {
+        if (phase.options.when && !(await phase.options.when({ input: phaseInput, ctx, flags }))) {
           for (const item of phaseSteps) {
             item.state.status = "skipped";
             drop(ctx, item.def.clean);
@@ -924,7 +930,7 @@ export class Script<
 
         if (phaseCache) {
           const hit = await safely(
-            () => readCache(phaseCache, slot, phaseInput, ctx, cacheMode),
+            () => readCache(phaseCache, slot, phaseInput, ctx, cacheMode, flags),
             { hit: false } as const,
             `read for phase "${phase.name}"`,
             renderer,
@@ -962,7 +968,7 @@ export class Script<
             break phaseLoop;
           }
 
-          if (item.def.when && !(await item.def.when({ input: phaseInput, ctx }))) {
+          if (item.def.when && !(await item.def.when({ input: phaseInput, ctx, flags }))) {
             item.state.status = "skipped";
             drop(ctx, item.def.clean);
             drop(delta, item.def.clean);
@@ -976,7 +982,7 @@ export class Script<
 
           if (stepCache) {
             const hit = await safely(
-              () => readCache(stepCache, stepKey, phaseInput, ctx, cacheMode),
+              () => readCache(stepCache, stepKey, phaseInput, ctx, cacheMode, flags),
               { hit: false } as const,
               `read for step "${item.state.name}"`,
               renderer,
@@ -1442,9 +1448,15 @@ export function stepFor<
 export function routineFor<In, Ctx extends object = {}>() {
   return <Out extends object, R extends PropertyKey, S, O extends OpenPhase>(
     name: string,
-    build: (script: Script<In, Ctx, never>) => Script<In, Out, R, S, O>,
+    // `UnknownFlags`, not the class's own `{}` default: a routine is written
+    // away from any particular script, so it cannot know what flags the host
+    // that eventually mounts it will have declared — same reasoning as
+    // `stepFor`'s default. A mount does not merge flags in either way; see
+    // `use()`. The actual values still reach a routine's steps at runtime,
+    // since a mounted routine's steps run through the host's own `run()`.
+    build: (script: Script<In, Ctx, never, {}, ClosedPhase, UnknownFlags>) => Script<In, Out, R, S, O>,
   ): Routine<In, Ctx, Out, R, Commit<S, O>> => {
-    const built = build(new Script<In, Ctx, never>(name));
+    const built = build(new Script<In, Ctx, never, {}, ClosedPhase, UnknownFlags>(name));
     const body = bodies.get(built);
     if (!body) throw new StepDefinitionError(name, `routineFor("${name}") must return the script it was given`);
 

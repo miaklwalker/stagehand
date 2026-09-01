@@ -65,28 +65,29 @@ interface CachedEntry {
 
 One stored result, exactly as a `CacheStore` reads and writes it.
 
-## `CacheSource<In, Ctx, Value>`
+## `CacheSource<In, Ctx, Value, Flags>`
 
 ```ts
-type CacheSource<In, Ctx, Value> = CacheStore | CacheOptions<In, Ctx, Value>;
+type CacheSource<In, Ctx, Value, Flags> = CacheStore | CacheOptions<In, Ctx, Value, Flags>;
 ```
 
 What `cache` accepts on a phase or a step: a bare `CacheStore` (shorthand for
 `{ store }`), or the fuller `CacheOptions`.
 
-## `CacheOptions<In, Ctx, Value>`
+## `CacheOptions<In, Ctx, Value, Flags>`
 
 ```ts
-interface CacheOptions<In, Ctx, Value> {
+interface CacheOptions<In, Ctx, Value, Flags> {
   store: CacheStore;
-  stale?: (context: StaleContext<In, Ctx>) => Awaitable<boolean>;
+  stale?: (context: StaleContext<In, Ctx, Flags>) => Awaitable<boolean>;
   schema?: StandardSchemaV1<unknown, Value>;
 }
 
-interface StaleContext<In, Ctx> {
+interface StaleContext<In, Ctx, Flags> {
   value: unknown;
   input: In;
   ctx: Ctx;       // the live context as it stands when the phase/step is reached
+  flags: Flags;   // values parsed from every defineFlag this script declared
   savedAt: number;
   ageMs: number;
 }

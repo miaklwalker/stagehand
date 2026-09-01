@@ -120,11 +120,22 @@ new Script<{ since: string; amazonKey: string; shopifyKey: string }>({ name: "al
   })
 ```
 
-`input` takes a fixed value or a function of `{ input, ctx }`, and it may be
-async. It is resolved **once per mount**, at the moment the mount is reached in
-execution order, and every phase and step of that fragment sees the result,
+`input` takes a fixed value or a function of `{ input, ctx, flags }`, and it may
+be async. It is resolved **once per mount**, at the moment the mount is reached
+in execution order, and every phase and step of that fragment sees the result,
 including its `when`, its `cache`, and its rollbacks during an unwind (a mounted
 step's `rollback` gets the mount's input, not the host's own).
+
+`flags` is how a routine, which cannot declare flags of its own, ends up
+driven by one anyway — the host declares it, and maps it in at the mount:
+
+```ts
+new Script({ name: "sync" })
+  .defineFlag({ name: "since", default: "2024-01-01" })
+  .use(pullChannel, { input: ({ input, flags }) => ({ channel: "amazon", since: flags.since, apiKey: input.amazonKey }) })
+```
+
+See [Flags](../guides/flags#mapping-a-flag-onto-a-routines-input).
 
 With a mapper, the host no longer has to match the routine's input shape at
 all — it only has to *produce* it. TypeScript checks the return value against

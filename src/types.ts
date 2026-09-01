@@ -117,12 +117,14 @@ export interface CacheStore {
 }
 
 /** What `stale` gets to decide on. */
-export interface StaleContext<In, Ctx> {
+export interface StaleContext<In, Ctx, Flags = unknown> {
   /** The stored value — the phase's context delta, or the step's return value. */
   value: unknown;
   input: In;
   /** The live context as it stands right now, *before* the entry is applied. */
   ctx: Ctx;
+  /** Values parsed from every `defineFlag` this script declared. */
+  flags: Flags;
   /** Wall-clock ms at which the entry was written. */
   savedAt: number;
   /** How old the entry is, in ms. A TTL is `({ ageMs }) => ageMs > 3_600_000`. */
@@ -136,14 +138,14 @@ export interface StaleContext<In, Ctx> {
  * There is no key: the store *is* the identity. Whether an entry is still
  * usable is `stale`'s job, and nothing else's.
  */
-export interface CacheOptions<In = unknown, Ctx = unknown, Value = unknown> {
+export interface CacheOptions<In = unknown, Ctx = unknown, Value = unknown, Flags = unknown> {
   store: CacheStore;
   /**
    * Return true to treat the stored entry as a miss — the work runs again and
    * the entry is overwritten. Given `value` as `unknown`; annotate the
    * parameter yourself, or hand over a `schema` and let it do the narrowing.
    */
-  stale?: (context: StaleContext<In, Ctx>) => Awaitable<boolean>;
+  stale?: (context: StaleContext<In, Ctx, Flags>) => Awaitable<boolean>;
   /**
    * Checked against the stored value on every read. A stored value that no
    * longer fits is a **miss**, not an error — which is what keeps a cache
@@ -153,9 +155,9 @@ export interface CacheOptions<In = unknown, Ctx = unknown, Value = unknown> {
   schema?: StandardSchemaV1<unknown, Value>;
 }
 
-export type CacheSource<In = unknown, Ctx = unknown, Value = unknown> =
+export type CacheSource<In = unknown, Ctx = unknown, Value = unknown, Flags = unknown> =
   | CacheStore
-  | CacheOptions<In, Ctx, Value>;
+  | CacheOptions<In, Ctx, Value, Flags>;
 
 /**
  * The value type a slot reads back as.
@@ -499,7 +501,7 @@ export interface StepDef<
     >,
   ) => Awaitable<void>;
   /** Skip the step (and its rollback) when this resolves falsy. */
-  when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
+  when?: (context: { input: In; ctx: Ctx; flags: Flags }) => Awaitable<boolean>;
   /**
    * Reuse this step's return value from a previous run instead of running the
    * handler. On a hit the stored value is merged into the context exactly as
@@ -511,7 +513,7 @@ export interface StepDef<
    * cache: { store: fileStore("./cache.json"), stale: ({ ageMs }) => ageMs > 60_000 }
    * ```
    */
-  cache?: CacheSource<In, Ctx>;
+  cache?: CacheSource<In, Ctx, unknown, Flags>;
   retry?: RetryPolicy;
   timeoutMs?: number;
 }
@@ -576,9 +578,9 @@ export interface InheritedKeyStepDef<
     >,
   ) => Awaitable<void>;
   /** See {@link StepDef.when}. */
-  when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
+  when?: (context: { input: In; ctx: Ctx; flags: Flags }) => Awaitable<boolean>;
   /** See {@link StepDef.cache}. */
-  cache?: CacheSource<In, Ctx>;
+  cache?: CacheSource<In, Ctx, unknown, Flags>;
   retry?: RetryPolicy;
   timeoutMs?: number;
 }
@@ -634,18 +636,19 @@ export type WithStepFor<
   ? Merge<Rest, Awaited<Out>>
   : never;
 
-export interface PhaseOptions<In = unknown, Ctx = unknown> {
+export interface PhaseOptions<In = unknown, Ctx = unknown, Flags = unknown> {
   description?: string;
   /** Skip every step in the phase when this resolves falsy. */
-  when?: (context: { input: In; ctx: Ctx }) => Awaitable<boolean>;
+  when?: (context: { input: In; ctx: Ctx; flags: Flags }) => Awaitable<boolean>;
   /**
    * Reuse this phase's work from a previous run. What gets stored is the
    * phase's **delta** — the keys its steps contributed to the context, minus
    * anything they cleaned — so a hit skips every step and merges that delta
    * over the live context, leaving keys from earlier phases alone.
    *
-   * `stale` and `when` see the context as it stands when the phase is reached,
-   * which is exactly `Ctx` here, so both are typed without any annotation.
+   * `stale` and `when` see the context (and `flags`) as they stand when the
+   * phase is reached, which is exactly `Ctx`/`Flags` here, so both are typed
+   * without any annotation.
    *
    * ```ts
    * .addPhase("Build", {
@@ -656,7 +659,7 @@ export interface PhaseOptions<In = unknown, Ctx = unknown> {
    * })
    * ```
    */
-  cache?: CacheSource<In, Ctx>;
+  cache?: CacheSource<In, Ctx, unknown, Flags>;
 }
 
 export interface ScriptOptions {

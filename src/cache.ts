@@ -172,6 +172,7 @@ export async function readCache(
   input: unknown,
   ctx: unknown,
   mode: CacheMode,
+  flags: unknown,
 ): Promise<CacheLookup> {
   if (mode === "off" || mode === "refresh") return MISS;
 
@@ -187,7 +188,7 @@ export async function readCache(
   }
 
   const ageMs = Math.max(0, Date.now() - entry.savedAt);
-  if (cache.stale && (await cache.stale({ value, input, ctx, savedAt: entry.savedAt, ageMs }))) {
+  if (cache.stale && (await cache.stale({ value, input, ctx, flags, savedAt: entry.savedAt, ageMs }))) {
     return MISS;
   }
 

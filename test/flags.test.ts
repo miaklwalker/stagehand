@@ -6,6 +6,8 @@ import {
   MissingFlagValueError,
   Script,
   UnknownFlagError,
+  memoryStore,
+  routineFor,
 } from "../dist/index.js";
 
 const quiet = { silent: true, handleSignals: false } as const;
@@ -176,4 +178,94 @@ test("flags are also available on a rollback's context", async () => {
 
   assert.equal(result.ok, false);
   assert.deepEqual(seen, [true]);
+});
+
+test("a step's `when` sees flags, without a manual copy into ctx", async () => {
+  const build = () =>
+    new Script({ name: "t", ...quiet })
+      .defineFlag({ name: "skip", boolean: true })
+      .addStep({
+        name: "maybe",
+        when: ({ flags }) => !flags.skip,
+        handler: () => ({ ran: true }),
+      });
+
+  const ran = await build().run(undefined, { argv: [] });
+  assert.equal(ran.ok && ran.ctx.ran, true);
+
+  const skipped = await build().run(undefined, { argv: ["--skip"] });
+  assert.equal(skipped.ok && "ran" in skipped.ctx, false);
+});
+
+test("a phase's `when` sees flags", async () => {
+  const build = () =>
+    new Script({ name: "t", ...quiet })
+      .defineFlag({ name: "production", boolean: true })
+      .addPhase("Publish", { when: ({ flags }) => flags.production })
+      .addStep({ name: "publish", handler: () => ({ published: true }) });
+
+  const staging = await build().run(undefined, { argv: [] });
+  assert.equal(staging.ok && "published" in staging.ctx, false);
+
+  const production = await build().run(undefined, { argv: ["--production"] });
+  assert.equal(production.ok && production.ctx.published, true);
+});
+
+test("a cached phase's `stale` sees flags", async () => {
+  const store = memoryStore();
+  let builds = 0;
+
+  const build = () =>
+    new Script({ name: "t", ...quiet })
+      .defineFlag({ name: "fresh", boolean: true })
+      .addPhase("Build", { cache: { store, stale: ({ flags }) => flags.fresh } })
+      .addStep({
+        name: "compile",
+        handler: () => {
+          builds += 1;
+          return { artifact: "a.tgz" };
+        },
+      });
+
+  await build().run(undefined, { argv: [] });
+  assert.equal(builds, 1);
+
+  await build().run(undefined, { argv: [] });
+  assert.equal(builds, 1, "still cached: --fresh was not passed");
+
+  await build().run(undefined, { argv: ["--fresh"] });
+  assert.equal(builds, 2, "--fresh forced the phase to treat the entry as stale");
+});
+
+test("a routine's mount `input` mapper receives flags — the native way to project a flag onto a routine's input", async () => {
+  const pullChannel = routineFor<{ channel: string }>()("pull channel", (s) =>
+    s.addPhase("Fetch").addStep({ name: "pull", handler: ({ input }) => ({ pulled: input.channel }) }),
+  );
+
+  const result = await new Script({ name: "t", ...quiet })
+    .defineFlag({ name: "channel", default: "default-channel" })
+    .use(pullChannel, { input: ({ flags }) => ({ channel: flags.channel }) })
+    .run(undefined, { argv: ["--channel", "amazon"] });
+
+  assert.ok(result.ok);
+  assert.equal(result.ok && result.ctx.pulled, "amazon");
+});
+
+test("a step declared inside routineFor can read context.flags, typed loosely", async () => {
+  const withFlags = routineFor<{ id: string }>()("with flags", (s) =>
+    s.addPhase("Go").addStep({
+      name: "read",
+      // `flags` is UnknownFlags (Record<string, unknown>) inside a routine —
+      // it cannot know the host's specific Flags shape, same as `stepFor`.
+      handler: ({ flags }) => ({ dryRun: flags.dryRun === true }),
+    }),
+  );
+
+  const result = await new Script({ name: "t", ...quiet })
+    .defineFlag({ name: "dryRun", boolean: true })
+    .use(withFlags, { input: { id: "x" } })
+    .run(undefined, { argv: ["--dry-run"] });
+
+  assert.ok(result.ok);
+  assert.equal(result.ok && result.ctx.dryRun, true);
 });
