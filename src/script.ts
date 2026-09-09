@@ -168,8 +168,8 @@ interface MountBinding {
  * the phase closes — which is the first moment its delta is fully known.
  *
  * `name` is `never` for a phase that declared no cache, so committing it adds
- * nothing: `Record<never, V>` is `{}`. That is also the starting state, which
- * is why no separate "is anything open" flag is needed.
+ * nothing — see {@link Commit}. That is also the starting state, which is why
+ * no separate "is anything open" flag is needed.
  */
 export interface OpenPhase {
   /** The phase's cache slot, or `never` when the phase declared no cache. */
@@ -189,9 +189,19 @@ export interface OpenPhase {
 export type ClosedPhase = { name: never; phase: "Main"; schema: unknown; delta: {} };
 
 
-/** Fold the open phase's slot into the map. A no-op for uncached phases. */
-export type Commit<Slots, Open extends OpenPhase> = Slots &
-  Record<Open["name"], SlotValue<Open["schema"], Open["delta"]>>;
+/**
+ * Fold the open phase's slot into the map. A no-op for uncached phases.
+ *
+ * The `never` case is written out rather than left to `Record<never, V>`
+ * resolving to `{}`: `Record` is a mapped type, and — for the reason
+ * {@link Merge} explains at length — a mapped type in an accumulated
+ * intersection is a chain link the compiler has to walk on every later call,
+ * while a plain intersection of leaves is free. Uncached phases are the
+ * common case, and this keeps them from spending a script's depth budget.
+ */
+export type Commit<Slots, Open extends OpenPhase> = [Open["name"]] extends [never]
+  ? Slots
+  : Slots & Record<Open["name"], SlotValue<Open["schema"], Open["delta"]>>;
 
 /** Phase options with `cache` required, so the cached overload is unambiguous. */
 export type CachedPhaseOptions<In, Ctx, Value, Flags = UnknownFlags> = Omit<

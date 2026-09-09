@@ -8,17 +8,43 @@ export type Prettify<T> = { [K in keyof T]: T[K] } & {};
 /**
  * Context after a step contributes `Out`. A step that returns nothing leaves
  * the context untouched; later keys win over earlier ones.
+ *
+ * Written to stay *flat*. `Script`'s context parameter is rebuilt by every
+ * `addStep`, so whatever this produces is fed straight back in as the next
+ * call's `Ctx` — a hundred links deep in a long script. TypeScript re-walks
+ * that accumulated type on each link, and its instantiation depth limit (100)
+ * is reached after `depth-per-link × links` — so every layer this adds costs
+ * roughly a hundredth of the longest chain a script may have before
+ * `TS2589: Type instantiation is excessively deep` lands on the whole chain.
+ *
+ * A plain intersection is the one shape that costs nothing: TypeScript
+ * flattens `A & B & C` into a single list of leaves and stops. A mapped type —
+ * `Omit`, `Pick`, `Prettify` — does not flatten, so a chain of them has to be
+ * walked one level per link. Hence, the three-way split: shadowing a key needs
+ * `Omit` and pays for it, and the overwhelmingly common case of a step adding
+ * fresh keys does not.
+ *
+ * `Prettify` deliberately does *not* appear here. It is applied where the
+ * context is read — a handler's `ctx`, `RunResult.ctx` — which is where a
+ * tooltip is actually wanted, and which is a leaf rather than a link.
  */
 export type Merge<Ctx, Out> = [Out] extends [void]
   ? Ctx
   : [Out] extends [undefined]
     ? Ctx
-    : Prettify<Omit<Ctx, keyof Out> & Out>;
+    : [Extract<keyof Ctx, keyof Out>] extends [never]
+      ? Ctx & Out
+      : Omit<Ctx, keyof Out> & Out;
 
 /**
  * Context with `Keys` dropped — what `clean` leaves behind for later steps.
+ *
+ * Identity when nothing is being cleaned, for the reason spelled out on
+ * {@link Merge}: the `Omit` is a chain link, and almost no step cleans.
  */
-export type Cleaned<Ctx, Keys extends PropertyKey> = Prettify<Omit<Ctx, Keys>>;
+export type Cleaned<Ctx, Keys extends PropertyKey> = [Keys] extends [never]
+  ? Ctx
+  : Omit<Ctx, Keys>;
 
 /**
  * The slice of the context a `rollback` sees: exactly the keys it asked for
@@ -365,8 +391,14 @@ export interface PromptHandle {
 export interface StepContext<In, Ctx, Slots = UnknownSlots, Flags = UnknownFlags> {
   /** The input the script was run with. */
   readonly input: In;
-  /** Data produced by every step that has already succeeded. */
-  readonly ctx: Ctx;
+  /**
+   * Data produced by every step that has already succeeded.
+   *
+   * `Prettify` here rather than on {@link Merge}: this is a leaf — nothing is
+   * accumulated off it — so flattening for the tooltip costs one instantiation
+   * instead of one per step in the whole chain.
+   */
+  readonly ctx: Prettify<Ctx>;
   /** Aborts on timeout, on Ctrl-C, or when `run` is canceled. */
   readonly signal: AbortSignal;
   /** 1 on the first try, 2 on the first retry, and so on. */
