@@ -10,7 +10,7 @@ description: >
 metadata:
   type: 'core'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
   - 'miaklwalker/stagehand:docs/guides/caching.md'
   - 'miaklwalker/stagehand:docs/reference/cache.md'
@@ -71,14 +71,14 @@ const BuildSchema = z.object({ artifact: z.string() });
   name: "compile",
   cache: {
     store: cache,
-    stale: ({ value, ctx, ageMs }) => ageMs > 3_600_000,
+    stale: ({ value, ctx, flags, ageMs }) => flags.fresh || ageMs > 3_600_000,
     schema: BuildSchema,
   },
   handler: async ({ input }) => ({ artifact: `dist/${input.ref}.tgz` }),
 })
 ```
 
-`stale` and `schema` both see the live context as of that step; a stored
+`stale` and `schema` both see the live context as of that step (`stale` also gets `flags`, so a `--fresh` flag can force a miss); a stored
 value that fails `schema` is treated as a miss, not an error.
 
 ### Controlling caching per run without touching the script

@@ -21,6 +21,8 @@ import { type FlagDef, kebabCase, parseFlags } from "./flags.js";
 import { errorMessage, type PhaseState, type RunState, type StepState } from "./state.js";
 import type {
   Awaitable,
+  BranchDef,
+  StepContext,
   BooleanFlagOptions,
   CacheMode,
   CacheSource,
@@ -634,6 +636,47 @@ export class Script<
     }
     phase.steps.push(step);
     return this;
+  }
+
+  /**
+   * Append a step that runs `onTrue` or `onFalse` depending on `condition`.
+   * Both arms return the same shape, so the context is typed identically for
+   * every later step whichever one ran — the way to model an override flag.
+   *
+   * ```ts
+   * .addBranch({
+   *   name: "resolve commit",
+   *   condition: ({ flags }) => Boolean(flags.sha),
+   *   onTrue: ({ flags }) => ({ sha: flags.sha as string }),
+   *   onFalse: async ({ input }) => ({ sha: await git.head(input.service) }),
+   * })
+   * ```
+   *
+   * It is an ordinary step once added: a failing `condition` or arm fails the
+   * step, and `retry` / `timeoutMs` cover the whole thing. There is no
+   * `rollback`, `cache` or `clean` — cache the enclosing phase instead.
+   */
+  addBranch<Out extends object | void, const Name extends string = string>(
+    def: Omit<BranchDef<In, Ctx, Out, Slots, Flags>, "name"> & { name: Name },
+  ): Script<
+    In,
+    Merge<Ctx, Out>,
+    Reserved,
+    Slots,
+    {
+      name: Open["name"];
+      phase: Open["phase"];
+      schema: Open["schema"];
+      delta: Merge<Open["delta"], Out>;
+    },
+    Flags
+  > {
+    const { condition, onTrue, onFalse, ...rest } = def;
+    return this.addStep({
+      ...rest,
+      handler: async (context: StepContext<In, Ctx, Slots, Flags>) =>
+        (await condition(context)) ? onTrue(context) : onFalse(context),
+    } as never) as never;
   }
 
   /**

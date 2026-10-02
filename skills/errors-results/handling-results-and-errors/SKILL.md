@@ -3,24 +3,39 @@ name: 'handling-results-and-errors'
 description: >
   Covers the RunResult discriminated union returned by run(), every exported error class
   (StepFailedError, StepTimeoutError, ScriptAbortedError, RollbackFailedError, CacheShapeError,
-  SchemaValidationError), the isAbort(error) helper, and the throwOnError script option. Load this
+  SchemaValidationError, UnknownFlagError, MissingFlagValueError, PromptCancelledError,
+  PromptUnavailableError), the isAbort(error) helper, and the throwOnError script option. Load this
   for "branch correctly on a failed run," "tell a Ctrl-C cancellation apart from a real failure,"
   or "get the phase/step name a failure happened at."
 metadata:
   type: 'core'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
+  - 'miaklwalker/stagehand:docs/guides/error-handling.md'
   - 'miaklwalker/stagehand:docs/guides/rollbacks.md'
   - 'miaklwalker/stagehand:docs/guides/script-options-and-result.md'
   - 'miaklwalker/stagehand:docs/reference/errors.md'
   - 'miaklwalker/stagehand:src/errors.ts'
   - 'miaklwalker/stagehand:src/script.ts'
+  - 'miaklwalker/stagehand:test/error-handling.test.ts'
 ---
 
 # Stagehand — Handling Results and Errors
 
 `run()` never throws for an ordinary step failure — it resolves to a discriminated union on `ok`. A handful of exported error classes exist for callers building their own reporting, but most of them never propagate through `run()` itself; knowing which ones do (and which don't) is the whole game.
+
+## The failure contract (read this before reasoning about rollback)
+
+- **Retries never roll back.** A failed attempt is not compensated; the handler simply re-runs against the same `input`/`ctx`. Rollback runs **once**, after the last attempt fails (or `retryIf` stops retrying).
+- **The failed step is never rolled back**, and steps after it never run (`"pending"`). Only steps that *completed* are compensated, in reverse order. Skipped and cached steps are not.
+- **Extent** is `ScriptOptions.rollback`: `"all"` (default) every completed step, `"phase"` only the failing step's phase, `"none"` nothing.
+- A **failing rollback** is recorded in `result.rollbacks` (`status: "rollback-failed"`), the rest still run, and `result.error` stays the original error.
+- A **timeout** (`StepTimeoutError`) is an ordinary failure: retried, `isAbort` false. A **cancellation** is never retried, gives `status: "aborted"`, and still compensates; a second signal abandons compensation.
+- **Not step failures** (thrown out of `run()`, nothing rolled back): `SchemaValidationError`, flag errors, and an error thrown by a `when` predicate or a mount `input` mapper. Keep those total; put fallible logic in a step or `addBranch`.
+- A step with `retry` must tolerate partial work: nothing compensates the failed attempts, so make it idempotent or clean up inside the handler before rethrowing.
+
+Full tables and the step lifecycle: docs/guides/error-handling.md.
 
 ## Setup
 
@@ -89,7 +104,7 @@ if (!result.ok) {
 }
 ```
 
-`isAbort(error)` returns `true` for a `ScriptAbortedError` or any `Error` named `"AbortError"` — checking `result.status === "aborted"` alongside it confirms the abort was the script's own, not an unrelated `AbortError` a handler happened to throw.
+`isAbort(error)` returns `true` for a `ScriptAbortedError`, a `PromptCancelledError` (Ctrl-C at a prompt), or any `Error` named `"AbortError"` — checking `result.status === "aborted"` alongside it confirms the abort was the script's own, not an unrelated `AbortError` a handler happened to throw.
 
 ### Use `throwOnError` when the script is one stage of a larger flow
 
@@ -157,7 +172,7 @@ try {
 }
 ```
 
-`SchemaValidationError` is always thrown directly by `run()`, before any phase executes, and is unaffected by `throwOnError` — there is no partial result to produce since nothing ran yet.
+`SchemaValidationError` is always thrown directly by `run()`, before any phase executes, and is unaffected by `throwOnError` — there is no partial result to produce since nothing ran yet. `UnknownFlagError` and `MissingFlagValueError` (bad `defineFlag` argv) behave the same way. `PromptUnavailableError`, by contrast, is thrown from inside a handler, so it arrives as an ordinary failed step.
 
 Source: docs/guides/typed-context.md; docs/reference/errors.md
 

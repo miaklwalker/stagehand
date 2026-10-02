@@ -83,6 +83,10 @@ which surfaces as a `StepTimeoutError` if the handler does not resolve first.
 `retry` and `timeoutMs` compose: a timeout that fires counts as a failed
 attempt, subject to the same `retryIf`.
 
+A failed attempt is **not** compensated: rollback runs once, after the last
+attempt, and only for the steps that completed before this one. See
+[Error Handling](../guides/error-handling#retries).
+
 ## The result
 
 `run()` resolves to a discriminated union on `ok`:

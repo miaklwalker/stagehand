@@ -5,7 +5,7 @@ description: >
 metadata:
   type: 'core'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
   - 'miaklwalker/stagehand:docs/guides/phases-and-steps.md'
   - 'miaklwalker/stagehand:docs/guides/script-options-and-result.md'
@@ -59,6 +59,10 @@ new Script<{ n: number }>({ name: "t" })
 ```
 
 The callback form groups a phase's steps visually while preserving the same type flow as the flat form; the two are interchangeable.
+
+### Two ways to do one step: `addBranch`
+
+`addBranch({ name, condition, onTrue, onFalse })` runs one of two arms that return the same shape, so the context stays typed either way. It takes `retry` and `timeoutMs` like any step, but no `rollback`, `cache` or `clean`. See skills/building-scripts/branching-steps/SKILL.md.
 
 ### Retry with backoff and veto specific errors
 

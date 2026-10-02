@@ -8,16 +8,17 @@ description: >
 metadata:
   type: 'core'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
   - 'miaklwalker/stagehand:docs/guides/phases-and-steps.md'
   - 'miaklwalker/stagehand:docs/guides/reusable-scripts.md'
+  - 'miaklwalker/stagehand:docs/guides/flags.md'
   - 'miaklwalker/stagehand:src/script.ts'
 ---
 
 # Stagehand — Conditional Steps and Phases
 
-`when` on `addStep` or `addPhase` is a function of `{ input, ctx }` (may be async) that gates whether the step, or every step in the phase, runs at all. A falsy result marks the step `"skipped"` — it never runs its handler and never runs its `rollback`.
+`when` on `addStep` or `addPhase` is a function of `{ input, ctx, flags }` (may be async) that gates whether the step, or every step in the phase, runs at all. A falsy result marks the step `"skipped"` — it never runs its handler and never runs its `rollback`.
 
 ## Setup
 
@@ -58,7 +59,7 @@ new Script<{ environment: "development" | "production" }>({ name: "deploy" })
   });
 ```
 
-`when` sees the same `{ input, ctx }` shape a handler does, so it can read anything an earlier step already put in context.
+`when` sees the same `{ input, ctx, flags }` a handler does, so it can read anything an earlier step already put in context, and any `defineFlag` value (`when: ({ flags }) => !flags.quiet`).
 
 ### Gate an entire phase
 
@@ -86,6 +87,21 @@ A falsy phase-level `when` marks every step in `"Release"` `"skipped"` in one sh
 ```
 
 `when` may return a promise; the script awaits it before deciding whether to run or skip the step (or, at phase level, the whole phase).
+
+### Need the output either way? Use `addBranch`
+
+A skipped step produces nothing, but `ctx` is still typed as though it ran. When later steps depend on the value, pick between two ways of producing it instead:
+
+```ts
+.addBranch({
+  name: "resolve commit",
+  condition: ({ flags }) => Boolean(flags.sha),
+  onTrue: ({ flags }) => ({ sha: flags.sha as string }),
+  onFalse: async () => ({ sha: await git.head() }),
+})
+```
+
+See skills/building-scripts/branching-steps/SKILL.md.
 
 ## Common Mistakes
 

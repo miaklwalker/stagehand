@@ -36,6 +36,7 @@ export type {
   Awaitable,
   BaseFlagOptions,
   BooleanFlagOptions,
+  BranchDef,
   CacheHandle,
   CacheMode,
   CacheOptions,

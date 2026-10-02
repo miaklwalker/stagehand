@@ -23,6 +23,11 @@ await new Script({ name: "t" })
 // order === ["two", "one"] — "three" never ran, so its rollback doesn't either
 ```
 
+For the exact ordering around retries, timeouts, cancellation and failing
+rollbacks, see [Error Handling](../guides/error-handling). In particular:
+retries never trigger a rollback, and rollback runs once, after a step has
+failed for good.
+
 ## Rollback scope
 
 `ScriptOptions.rollback` controls how far the unwind reaches:

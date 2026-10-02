@@ -7,7 +7,7 @@ description: >
 metadata:
   type: 'core'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
   - 'miaklwalker/stagehand:docs/guides/reusable-scripts.md'
   - 'miaklwalker/stagehand:docs/guides/caching.md'
@@ -104,7 +104,7 @@ const result = await new Script<{ region: string }>({ name: "t" })
   .run({ region: "eu" });
 ```
 
-`input` takes a fixed value or an `{ input, ctx } => SubIn` mapper, may be async, and is resolved once per mount at the moment the mount is reached — the host no longer has to match the routine's input shape, only produce it.
+`input` takes a fixed value or an `{ input, ctx, flags } => SubIn` mapper, may be async, and is resolved once per mount at the moment the mount is reached — the host no longer has to match the routine's input shape, only produce it. `flags` is how a routine, which cannot declare flags itself, is driven by one: `use(r, { input: ({ flags }) => ({ env: flags.environment }) })`.
 
 ## Common Mistakes
 
@@ -152,7 +152,7 @@ export const pullChannel = routineFor<{ channel: string; since: string }>()(
 );
 ```
 
-A mount's input is resolved once, when the mount is reached, from either a fixed value or an `{ input, ctx } => SubIn` mapper — every `when` inside that fragment (phase- or step-level) is evaluated against the mount's resolved input, never the host's own.
+A mount's input is resolved once, when the mount is reached, from either a fixed value or an `{ input, ctx, flags } => SubIn` mapper — every `when` inside that fragment (phase- or step-level) is evaluated against the mount's resolved input, never the host's own.
 
 Source: docs/guides/reusable-scripts.md ("Giving a mount its own input"); src/script.ts use()/run() mount input resolution
 

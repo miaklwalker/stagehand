@@ -5,7 +5,7 @@ description: >
 metadata:
   type: 'core'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
   - 'miaklwalker/stagehand:docs/guides/splitting-steps.md'
   - 'miaklwalker/stagehand:src/script.ts'

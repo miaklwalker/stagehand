@@ -5,7 +5,7 @@ description: >
 metadata:
   type: 'core'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
   - 'miaklwalker/stagehand:docs/guides/handler-surface.md'
   - 'miaklwalker/stagehand:src/context.ts'
@@ -13,6 +13,8 @@ sources:
 ---
 
 # Stagehand — Reporting Progress From a Step
+
+The handler context also carries `prompt` (see skills/building-scripts/prompting-the-user/SKILL.md) and `flags` (see skills/building-scripts/command-line-flags/SKILL.md); this skill covers only the output side.
 
 Every handler receives `status`, `note`, `progress`, `task`, `tasks`, and the five log methods as part of its single context object. `rollback` gets a smaller subset — `log` (no `info`/`warn`/`error`/`success`), `status`, `note`, and `progress`, but not `task`/`tasks`.
 

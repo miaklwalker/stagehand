@@ -10,7 +10,7 @@ description: >
 metadata:
   type: 'core'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
   - 'miaklwalker/stagehand:docs/guides/rollbacks.md'
   - 'miaklwalker/stagehand:docs/reference/errors.md'
@@ -25,6 +25,8 @@ When a step fails, every step that already **succeeded** is compensated in rever
 completed, first undone. The step that actually failed is never compensated: it never completed, so
 there's nothing to undo. A rollback gets no context by default; it has to name every key it needs
 through `rollbackKeys`, which both narrows and permanently reserves them.
+
+Rollback timing, retries and scope are specified exactly in docs/guides/error-handling.md (summary: skills/errors-results/handling-results-and-errors/SKILL.md, "The failure contract"). Notably, retries do not trigger rollback and the failed step is never rolled back.
 
 ## Setup
 

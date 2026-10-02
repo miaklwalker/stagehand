@@ -14,6 +14,7 @@
         { "label": "Phases and Steps", "to": "guides/phases-and-steps" },
         { "label": "The Typed Context", "to": "guides/typed-context" },
         { "label": "Rollbacks", "to": "guides/rollbacks" },
+        { "label": "Error Handling", "to": "guides/error-handling" },
         { "label": "Cleaning Context Keys", "to": "guides/cleaning-context" },
         { "label": "The Handler Surface", "to": "guides/handler-surface" },
         { "label": "Prompts", "to": "guides/prompts" },

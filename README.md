@@ -303,6 +303,26 @@ per placement.
 `when` returning false marks the step **skipped** — its rollback never runs.
 Phases accept `when` too, which skips all their steps.
 
+### Branching: `addBranch`
+
+`when` skips a step, which leaves later steps without what it would have
+produced. `addBranch` chooses between two arms that return the same shape, so
+`ctx` is typed correctly whichever one runs — the natural home for an override
+flag:
+
+```ts
+.addBranch({
+  name: "resolve commit",
+  condition: ({ flags }) => Boolean(flags.sha),
+  onTrue: ({ flags }) => ({ sha: flags.sha as string }),
+  onFalse: async ({ input }) => ({ sha: await git.head(input.service) }),
+})
+```
+
+`onTrue` fixes the output type and `onFalse` must match it. A branch takes
+`description`, `retry` and `timeoutMs`, but no `rollback`, `cache` or `clean`:
+cache the phase it lives in instead.
+
 ## Caching
 
 A phase or a step can reuse what it produced on an earlier run. Point it at a
@@ -612,7 +632,7 @@ fragment someone else's script also mounts.
 
 ## Examples
 
-Eleven runnable scripts, each aimed at a different part of the API. Most take
+Twelve runnable scripts, each aimed at a different part of the API. Most take
 a flag to switch between the happy path and the interesting one.
 
 | | |
@@ -627,6 +647,7 @@ a flag to switch between the happy path and the interesting one.
 | [`cache.ts`](examples/cache.ts) | A cached `Build` phase and a cached step. Run it twice to watch the second run skip both. `-- --fresh` to rebuild and overwrite |
 | [`invalidate.ts`](examples/invalidate.ts) | `context.cache` from inside a step: correct an entry without refetching, drop one that is beyond saving, and watch the shape guard catch an entry written before the code changed. `-- --patch`, `-- --drop`, `-- --drift` |
 | [`routine.ts`](examples/routine.ts) | One reusable fragment in [`routines/channel.ts`](examples/routines/channel.ts), mounted by a sync script and, months later, a report that maps its own input onto the routine's — and gets the pull from cache. `-- --multi` mounts it twice, one storefront and API key per mount |
+| [`branch.ts`](examples/branch.ts) | `addBranch` with an override flag: both arms hand later steps the same `sha`. `-- --sha abc1234` takes the override arm |
 | [`validate.ts`](examples/validate.ts) | The smallest thing that runs: two steps, `rollback: "none"` |
 
 ```

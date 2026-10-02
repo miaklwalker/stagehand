@@ -104,6 +104,41 @@ of the work done, so the type and the runtime state never disagree about what a
 skipped step removed. See [Cleaning Context Keys](../guides/cleaning-context) for
 why that matters.
 
+## `addBranch`: one step, two ways to do it
+
+`when` can only skip a step, which is the wrong tool when later steps need what
+that step produces: the skipped step leaves nothing behind, but `ctx` is typed
+as if it had run. A branch picks between two arms that **return the same
+shape**, so `ctx` is true whichever one ran. An override flag is the typical
+case: use the supplied value, or work it out.
+
+```ts
+new Script<{ service: string }>({ name: "deploy" })
+  .defineFlag({ name: "sha" })
+  .addPhase("Resolve")
+  .addBranch({
+    name: "resolve commit",
+    condition: ({ flags }) => Boolean(flags.sha),
+    onTrue: ({ flags }) => ({ sha: flags.sha as string }),
+    onFalse: async ({ input }) => ({ sha: await git.head(input.service) }),
+  })
+  .addStep({ name: "build", handler: ({ ctx }) => ({ image: `app:${ctx.sha}` }) });
+```
+
+`condition`, `onTrue` and `onFalse` all receive the full handler context
+(`input`, `ctx`, `flags`, `status`, `prompt`, ...), and `condition` may be
+async. It runs once per attempt; only the chosen arm executes.
+
+`onTrue`'s return type fixes the step's output, and `onFalse` has to return
+something assignable to it. Return different shapes and it is a compile error
+on `onFalse`, rather than a union that every later step has to narrow.
+
+A branch is deliberately small. It takes `name`, `description`, `retry` and
+`timeoutMs`, which cover the whole step (condition and arm together), and
+nothing else: no `rollback`, `cache`, `clean` or `when`. To cache the result,
+cache the [phase](../guides/caching) the branch sits in; to drop a key, `clean`
+it in a later step.
+
 ## `outline()`
 
 Every `Script` exposes `outline()`, which reports the declared structure without

@@ -7,7 +7,7 @@ description: >
 metadata:
   type: 'lifecycle'
   library: 'stagehand'
-  library_version: '0.5.3'
+  library_version: '0.8.0'
 sources:
   - 'miaklwalker/stagehand:README.md'
   - 'miaklwalker/stagehand:docs/quick-start.md'

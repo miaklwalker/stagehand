@@ -551,6 +551,30 @@ export interface StepDef<
 }
 
 /**
+ * A step that does one of two jobs and hands back the same shape either way.
+ *
+ * `onTrue` is the source of truth for `Out`; `onFalse` has to return something
+ * assignable to it, so every later step sees one `ctx` type whichever arm ran.
+ * That is the difference from `when`, which skips a step and leaves nothing
+ * behind for the steps that depended on it.
+ *
+ * Deliberately small: no `rollback`, no `cache`, no `clean`. Cache the phase
+ * the branch sits in, and `clean` in a later step.
+ */
+export interface BranchDef<In, Ctx, Out, Slots = UnknownSlots, Flags = UnknownFlags> {
+  name: string;
+  description?: string;
+  /** Picks the arm. May be async; evaluated once per attempt. */
+  condition: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<boolean>;
+  /** Runs when `condition` resolves truthy. Its return type fixes `Out`. */
+  onTrue: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<Out>;
+  /** Runs otherwise. Must return the same shape as `onTrue`. */
+  onFalse: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<NoInfer<Out>>;
+  retry?: RetryPolicy;
+  timeoutMs?: number;
+}
+
+/**
  * The same step definition as {@link StepDef}, for the case where every
  * `rollbackKeys` entry names a key the incoming context *already* has —
  * something an earlier step produced, not something this one returns.

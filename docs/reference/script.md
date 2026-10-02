@@ -1,6 +1,6 @@
 ---
 title: "Script"
-description: "The Script class API: constructor, defineInput, addPhase, addStep, use, outline, run, plus script(), stepFor, and routineFor."
+description: "The Script class API: constructor, defineInput, addPhase, addStep, addBranch, use, outline, run, plus script(), stepFor, and routineFor."
 ---
 
 `Script<In, Ctx, Reserved, Slots, Open, Flags>` is the builder every script
@@ -241,6 +241,33 @@ interface RetryPolicy {
   retryIf?: (error: unknown, attempt: number) => boolean;
 }
 ```
+
+## `.addBranch(def)`
+
+```ts
+addBranch<Out extends object | void, const Name extends string>(
+  def: BranchDef<In, Ctx, Out, Slots, Flags> & { name: Name },
+): Script<In, Merge<Ctx, Out>, Reserved, Slots, Open, Flags>
+
+interface BranchDef<In, Ctx, Out, Slots, Flags> {
+  name: string;
+  description?: string;
+  condition: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<boolean>;
+  onTrue: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<Out>;
+  onFalse: (context: StepContext<In, Ctx, Slots, Flags>) => Awaitable<NoInfer<Out>>;
+  retry?: RetryPolicy;
+  timeoutMs?: number;
+}
+```
+
+Appends a step to the open phase that runs `onTrue` when `condition` resolves
+truthy and `onFalse` otherwise. `Out` is inferred from `onTrue`; `onFalse` must
+return the same shape, so the context is typed identically for every later step
+whichever arm ran. It is an ordinary step at run time, so a throw from the
+condition or either arm fails it, and `retry` / `timeoutMs` cover the whole
+thing. There is no `rollback`, `cache`, `clean` or `when`. Throws
+`DuplicateNameError` if the name is already used in its phase. See
+[Phases and Steps](../guides/phases-and-steps#addbranch-one-step-two-ways-to-do-it).
 
 ## `.use(source, options?)`
 
